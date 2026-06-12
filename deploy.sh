@@ -11,6 +11,7 @@ LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)/tidal-dl"
 echo "=== 1. 同步代码 ==="
 rsync -avz "$LOCAL_DIR/server/" "$REMOTE:$REMOTE_DIR/server/" --exclude='__pycache__'
 rsync -avz "$LOCAL_DIR/worker/" "$REMOTE:$REMOTE_DIR/worker/" --exclude='__pycache__'
+rsync -avz "$LOCAL_DIR/web/dist/" "$REMOTE:$REMOTE_DIR/web/dist/"
 echo "✅ 代码同步完成"
 
 echo ""

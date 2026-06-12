@@ -77,7 +77,8 @@ class TokenImport(BaseModel):
     """
     access_token: str
     refresh_token: Optional[str] = ""
-    oauth_client_id: Optional[str] = None  # 从 curl 请求里复制的真正 OAuth client_id
+    oauth_client_id: Optional[str] = None
+    email: Optional[str] = None
 
 
 @router.post("/import-token")
@@ -144,7 +145,7 @@ def import_token(data: TokenImport, db=Depends(get_db_dependency)):
         "token_expires_at, client_id, subscription_type, highest_quality, status"
     )
     insert_values = "%s, %s, %s, %s, %s, %s, %s, 'PREMIUM', 'LOSSLESS', 'active'"
-    params = ["", user_id, country_code, token, data.refresh_token,
+    params = [data.email or "", user_id, country_code, token, data.refresh_token,
               expires_at.strftime("%Y-%m-%d %H:%M:%S"), client_id]
     if oauth_client_id:
         insert_fields += ", oauth_client_id"

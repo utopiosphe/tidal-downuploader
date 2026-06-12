@@ -350,7 +350,7 @@ const Dashboard = {
             const a = d.value.accounts || {};
             return Object.values(a).reduce((s, v) => s + v, 0);
         });
-        onMounted(() => { load(); timer = setInterval(load, 5000); });
+        onMounted(() => { load(); timer = setInterval(load, 15000); });
         onUnmounted(() => clearInterval(timer));
         return { d, fmtBytes, fmtTime, totalAccounts };
     }
@@ -372,6 +372,7 @@ const Jobs = {
                     <span :class="'badge badge-' + job.status" style="margin-left:10px">{{ job.status }}</span>
                 </div>
                 <div style="display:flex;gap:8px">
+                    <button class="btn btn-sm" style="background:rgba(74,222,128,0.15);color:#4ade80" @click="loadExportGroups(job.id, job.name)" v-if="job.completed > 0">📥 导出</button>
                     <button class="btn btn-sm btn-warning" @click="retryFailed(job.id)" v-if="job.failed > 0">🔄 重试失败</button>
                     <button class="btn btn-sm btn-danger" @click="pauseJob(job.id)" v-if="job.status === 'running'">⏸ 暂停</button>
                     <button class="btn btn-sm btn-success" @click="resumeJob(job.id)" v-if="job.status === 'paused'">▶ 恢复</button>
@@ -417,6 +418,32 @@ const Jobs = {
                 </div>
             </div>
         </div>
+
+        <!-- Export Modal -->
+        <div class="modal-overlay" v-if="showExport" @click.self="showExport = false">
+            <div class="modal">
+                <div class="modal-title">📥 导出已完成任务 - {{ exportJobName }}</div>
+                <div v-if="exportLoading" style="text-align:center;padding:20px;color:#888">加载中...</div>
+                <div v-else-if="exportGroups.length === 0" style="text-align:center;padding:20px;color:#888">暂无已完成任务</div>
+                <div v-else>
+                    <div style="margin-bottom:12px;color:#888;font-size:13px">共 {{ exportTotal.toLocaleString() }} 条已完成，每 50,000 条一组（按完成时间倒序）</div>
+                    <div v-for="g in exportGroups" :key="g.group_index" 
+                         style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;margin-bottom:8px;background:rgba(255,255,255,0.04);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
+                        <div>
+                            <div style="font-weight:600;color:#e0e0e0;margin-bottom:4px">{{ g.label }}</div>
+                            <div style="font-size:11px;color:#666">{{ g.time_range_end?.slice(0,16) }} ~ {{ g.time_range_start?.slice(0,16) }}</div>
+                        </div>
+                        <div style="display:flex;align-items:center;gap:8px">
+                            <span style="font-size:12px;color:#888">{{ g.count.toLocaleString() }} 条</span>
+                            <button class="btn btn-sm btn-primary" @click="downloadGroup(g.group_index)">⬇ 下载 CSV</button>
+                        </div>
+                    </div>
+                </div>
+                <div style="display:flex;justify-content:flex-end;margin-top:16px">
+                    <button class="btn" style="background:rgba(255,255,255,0.06);color:#888" @click="showExport = false">关闭</button>
+                </div>
+            </div>
+        </div>
     </div>`,
     setup() {
         const jobs = ref([]);
@@ -424,6 +451,13 @@ const Jobs = {
         const importName = ref('');
         const importFile = ref(null);
         const importing = ref(false);
+
+        const showExport = ref(false);
+        const exportGroups = ref([]);
+        const exportTotal = ref(0);
+        const exportLoading = ref(false);
+        const exportJobId = ref(0);
+        const exportJobName = ref('');
 
         const load = async () => { try { jobs.value = await api('/jobs'); } catch(e) {} };
 
@@ -460,10 +494,28 @@ const Jobs = {
         const pauseJob = async (id) => { await api('/jobs/' + id + '/pause', { method: 'POST' }); showToast('已暂停'); load(); };
         const resumeJob = async (id) => { await api('/jobs/' + id + '/resume', { method: 'POST' }); showToast('已恢复'); load(); };
 
+        const loadExportGroups = async (jobId, jobName) => {
+            exportJobId.value = jobId;
+            exportJobName.value = jobName || 'Job ' + jobId;
+            showExport.value = true;
+            exportLoading.value = true;
+            try {
+                const data = await api('/tasks/export/groups?job_id=' + jobId);
+                exportGroups.value = data.groups || [];
+                exportTotal.value = data.total || 0;
+            } catch(e) {
+                showToast('加载分组失败: ' + e.message, 'error');
+            }
+            exportLoading.value = false;
+        };
+        const downloadGroup = (groupIndex) => {
+            window.open(API + '/tasks/export/download?job_id=' + exportJobId.value + '&group=' + groupIndex, '_blank');
+        };
+
         let timer;
-        onMounted(() => { load(); timer = setInterval(load, 5000); });
+        onMounted(() => { load(); timer = setInterval(load, 15000); });
         onUnmounted(() => clearInterval(timer));
-        return { jobs, showImport, importName, importFile, importing, onFileSelect, onDrop, doImport, retryFailed, pauseJob, resumeJob, fmtBytes, fmtTime };
+        return { jobs, showImport, showExport, exportGroups, exportTotal, exportLoading, exportJobName, importName, importFile, importing, onFileSelect, onDrop, doImport, retryFailed, pauseJob, resumeJob, loadExportGroups, downloadGroup, fmtBytes, fmtTime };
     }
 };
 
@@ -541,7 +593,7 @@ const Tasks = {
         const loadJobs = async () => { try { jobList.value = await api('/jobs'); } catch(e) {} };
 
         let timer;
-        onMounted(() => { load(); loadJobs(); timer = setInterval(load, 5000); });
+        onMounted(() => { load(); loadJobs(); timer = setInterval(load, 15000); });
         onUnmounted(() => clearInterval(timer));
         return { tasks, total, page, pageSize, filter, jobList, load, fmtBytes };
     }
@@ -641,27 +693,86 @@ const Accounts = {
 
         <!-- Manual Token Modal -->
         <div class="modal-overlay" v-if="showManual" @click.self="showManual = false">
-            <div class="modal">
+            <div class="modal" style="max-width:600px">
                 <div class="modal-title">📋 手动导入 Token</div>
-                <div style="font-size:12px;color:#888;margin-bottom:16px">
-                    从浏览器 F12 → Network 找到 <code>auth.tidal.com/v1/oauth2/token</code> 请求<br>
-                    复制响应中的 access_token / refresh_token，以及请求参数中的 client_id
+
+                <!-- 模式切换 -->
+                <div style="display:flex;gap:8px;margin-bottom:16px">
+                    <button class="btn btn-sm" :style="importMode === 'json' ? 'background:rgba(139,92,246,0.2);color:#a78bfa' : 'background:rgba(255,255,255,0.06);color:#888'"
+                            @click="importMode = 'json'">📄 粘贴 JSON</button>
+                    <button class="btn btn-sm" :style="importMode === 'manual' ? 'background:rgba(139,92,246,0.2);color:#a78bfa' : 'background:rgba(255,255,255,0.06);color:#888'"
+                            @click="importMode = 'manual'">✏️ 手动填写</button>
                 </div>
-                <div class="form-group">
-                    <label class="form-label">Access Token <span style="color:#f87171">*</span></label>
-                    <textarea class="form-input" v-model="importToken.access_token" rows="4" placeholder="eyJraWQiOi..." style="font-family:monospace;font-size:11px"></textarea>
+
+                <!-- JSON 粘贴模式 -->
+                <div v-if="importMode === 'json'">
+                    <div style="font-size:12px;color:#888;margin-bottom:12px">
+                        粘贴 TIDAL OAuth 响应的完整 JSON（包含 access_token / refresh_token / user 等字段）
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">OAuth Client ID <span style="color:#888">(如 49YxDN9a2aFV6RTG)</span></label>
+                        <input class="form-input" v-model="importToken.oauth_client_id" placeholder="49YxDN9a2aFV6RTG" style="font-family:monospace;font-size:12px" />
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">JSON 响应 <span style="color:#f87171">*</span></label>
+                        <textarea class="form-input" v-model="jsonInput" rows="8" placeholder='粘贴完整 JSON，例如：
+{
+    "access_token": "eyJraWQi...",
+    "refresh_token": "eyJraWQi...",
+    "user": {
+        "email": "xxx@xxx.com",
+        "userId": 208571779,
+        "countryCode": "US"
+    }
+}' style="font-family:monospace;font-size:11px" @input="parseJsonInput"></textarea>
+                    </div>
+
+                    <!-- 解析结果预览 -->
+                    <div v-if="parsedPreview" style="background:rgba(74,222,128,0.06);border:1px solid rgba(74,222,128,0.15);border-radius:8px;padding:12px;margin-bottom:16px;font-size:12px">
+                        <div style="color:#4ade80;font-weight:600;margin-bottom:8px">✅ 解析成功</div>
+                        <div style="display:grid;grid-template-columns:100px 1fr;gap:4px 8px;color:#ccc">
+                            <span style="color:#888">邮箱:</span><span>{{ parsedPreview.email || '-' }}</span>
+                            <span style="color:#888">User ID:</span><span>{{ parsedPreview.user_id || '-' }}</span>
+                            <span style="color:#888">地区:</span><span>{{ parsedPreview.country_code || '-' }}</span>
+                            <span style="color:#888">Access Token:</span><span style="font-family:monospace;word-break:break-all">{{ (parsedPreview.access_token || '').slice(0,40) }}...</span>
+                            <span style="color:#888">Refresh Token:</span><span>{{ parsedPreview.refresh_token ? '✅ 已获取' : '❌ 无' }}</span>
+                            <span style="color:#888">Client ID:</span><span>{{ importToken.oauth_client_id || '-' }}</span>
+                        </div>
+                    </div>
+                    <div v-else-if="jsonInput.trim() && jsonParseError" style="background:rgba(248,113,113,0.06);border:1px solid rgba(248,113,113,0.15);border-radius:8px;padding:12px;margin-bottom:16px;font-size:12px;color:#f87171">
+                        ❌ {{ jsonParseError }}
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label class="form-label">Refresh Token <span style="color:#888">(填写后支持自动续期)</span></label>
-                    <textarea class="form-input" v-model="importToken.refresh_token" rows="2" placeholder="eyJraWQiOi..." style="font-family:monospace;font-size:11px"></textarea>
+
+                <!-- 手动填写模式 -->
+                <div v-if="importMode === 'manual'">
+                    <div style="font-size:12px;color:#888;margin-bottom:12px">
+                        逐字段填写账号信息
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Access Token <span style="color:#f87171">*</span></label>
+                        <textarea class="form-input" v-model="importToken.access_token" rows="3" placeholder="eyJraWQiOi..." style="font-family:monospace;font-size:11px"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Refresh Token <span style="color:#888">(填写后支持自动续期)</span></label>
+                        <textarea class="form-input" v-model="importToken.refresh_token" rows="2" placeholder="eyJraWQiOi..." style="font-family:monospace;font-size:11px"></textarea>
+                    </div>
+                    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+                        <div class="form-group">
+                            <label class="form-label">OAuth Client ID</label>
+                            <input class="form-input" v-model="importToken.oauth_client_id" placeholder="49YxDN9a2aFV6RTG" style="font-family:monospace;font-size:12px" />
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">邮箱 <span style="color:#888">(可选)</span></label>
+                            <input class="form-input" v-model="importToken.email" placeholder="user@example.com" style="font-size:12px" />
+                        </div>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label class="form-label">OAuth Client ID <span style="color:#888">(从 curl 请求的 client_id 参数复制，如 49YxDN9a2aFV6RTG)</span></label>
-                    <input class="form-input" v-model="importToken.oauth_client_id" placeholder="49YxDN9a2aFV6RTG" style="font-family:monospace;font-size:12px" />
-                </div>
+
                 <div style="display:flex;gap:10px;justify-content:flex-end">
                     <button class="btn" style="background:rgba(255,255,255,0.06);color:#888" @click="showManual = false">取消</button>
-                    <button class="btn btn-primary" @click="doImportToken" :disabled="!importToken.access_token.trim()">导入</button>
+                    <button class="btn btn-primary" @click="doImportToken"
+                            :disabled="importMode === 'json' ? !parsedPreview : !importToken.access_token.trim()">导入</button>
                 </div>
             </div>
         </div>
@@ -682,9 +793,43 @@ const Accounts = {
             subscription_type: 'PREMIUM', highest_quality: 'LOSSLESS',
         });
 
-        const importToken = reactive({ access_token: '', refresh_token: '', oauth_client_id: '' });
+        const importToken = reactive({ access_token: '', refresh_token: '', oauth_client_id: '', email: '' });
+        const importMode = ref('json');
+        const jsonInput = ref('');
+        const parsedPreview = ref(null);
+        const jsonParseError = ref('');
 
         const load = async () => { try { accounts.value = await api('/accounts'); } catch(e) {} };
+
+        const parseJsonInput = () => {
+            parsedPreview.value = null;
+            jsonParseError.value = '';
+            const raw = jsonInput.value.trim();
+            if (!raw) return;
+            try {
+                // 尝试提取 JSON 部分（跳过 email,password 和 client_id 行）
+                const jsonMatch = raw.match(/\{[\s\S]*\}/);
+                if (!jsonMatch) { jsonParseError.value = '未找到 JSON 对象'; return; }
+                const data = JSON.parse(jsonMatch[0]);
+                if (!data.access_token) { jsonParseError.value = '缺少 access_token 字段'; return; }
+                const user = data.user || {};
+                parsedPreview.value = {
+                    access_token: data.access_token,
+                    refresh_token: data.refresh_token || '',
+                    email: user.email || user.username || '',
+                    user_id: data.user_id || user.userId || '',
+                    country_code: user.countryCode || '',
+                };
+                // 尝试从非JSON部分提取 client_id
+                const preJson = raw.slice(0, raw.indexOf('{'));
+                const cidMatch = preJson.match(/client_id[：:]\s*(\S+)/i);
+                if (cidMatch && !importToken.oauth_client_id) {
+                    importToken.oauth_client_id = cidMatch[1].trim();
+                }
+            } catch(e) {
+                jsonParseError.value = 'JSON 解析失败: ' + e.message;
+            }
+        };
 
         // === 设备码授权 ===
         const startDeviceAuth = async () => {
@@ -753,13 +898,32 @@ const Accounts = {
         // === 手动导入 Token ===
         const doImportToken = async () => {
             try {
+                let body;
+                if (importMode.value === 'json' && parsedPreview.value) {
+                    body = {
+                        access_token: parsedPreview.value.access_token,
+                        refresh_token: parsedPreview.value.refresh_token,
+                        oauth_client_id: importToken.oauth_client_id || undefined,
+                        email: parsedPreview.value.email || undefined,
+                    };
+                } else {
+                    body = {
+                        access_token: importToken.access_token,
+                        refresh_token: importToken.refresh_token,
+                        oauth_client_id: importToken.oauth_client_id || undefined,
+                        email: importToken.email || undefined,
+                    };
+                }
                 const data = await api('/accounts/import-token', {
                     method: 'POST',
-                    body: JSON.stringify(importToken)
+                    body: JSON.stringify(body)
                 });
                 showToast(`导入成功！user_id=${data.user_id}, 地区=${data.country_code}, 过期=${data.expires_at}`);
                 showManual.value = false;
-                Object.assign(importToken, { access_token: '', refresh_token: '', oauth_client_id: '' });
+                Object.assign(importToken, { access_token: '', refresh_token: '', oauth_client_id: '', email: '' });
+                jsonInput.value = '';
+                parsedPreview.value = null;
+                jsonParseError.value = '';
                 load();
             } catch(e) { showToast('导入失败: ' + e.message, 'error'); }
         };
@@ -782,7 +946,8 @@ const Accounts = {
         onMounted(load);
         onUnmounted(() => { clearInterval(pollTimer); clearInterval(countdownTimer); });
         return { accounts, showManual, showDevice, deviceStep, deviceAuth, countdown,
-                 form, importToken, startDeviceAuth, cancelDevice, copyUrl, addAccount, doImportToken, refreshToken, delAccount, fmtTime, load };
+                 form, importToken, importMode, jsonInput, parsedPreview, jsonParseError,
+                 startDeviceAuth, cancelDevice, copyUrl, addAccount, doImportToken, parseJsonInput, refreshToken, delAccount, fmtTime, load };
     }
 };
 
@@ -878,7 +1043,7 @@ const Workers = {
         };
 
         let timer;
-        onMounted(() => { load(); timer = setInterval(load, 5000); });
+        onMounted(() => { load(); timer = setInterval(load, 15000); });
         onUnmounted(() => clearInterval(timer));
         return { workers, showEdit, editWorker, isOnline, editConcurrency, saveWorker, delWorker, fmtBytes, fmtTime };
     }

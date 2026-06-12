@@ -24,7 +24,7 @@ def build_session(proxy_config: dict) -> requests.Session:
     session.verify = False
 
     # 增大连接池以匹配高并发
-    adapter = requests.adapters.HTTPAdapter(pool_connections=100, pool_maxsize=100)
+    adapter = requests.adapters.HTTPAdapter(pool_connections=500, pool_maxsize=500)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
 

@@ -4,6 +4,7 @@ S3 上传模块
 import boto3
 import logging
 import os
+from botocore.config import Config as BotoConfig
 
 logger = logging.getLogger("worker.uploader")
 
@@ -21,6 +22,7 @@ class S3Uploader:
                 aws_access_key_id=s3_config["access_key"],
                 aws_secret_access_key=s3_config["secret_key"],
                 region_name=s3_config.get("region", "us-east-1"),
+                config=BotoConfig(max_pool_connections=200),
             )
             logger.info(f"S3 已配置: {s3_config['endpoint']} / {s3_config['bucket']}")
         else:

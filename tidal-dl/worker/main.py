@@ -59,7 +59,7 @@ class AccountPool:
 
     def pick(self) -> dict | None:
         """选择最优账号（最闲 + 不在冷却中 + 不超过最大并发）"""
-        MAX_PER_ACCOUNT = 5
+        MAX_PER_ACCOUNT = 10
         with self._lock:
             now = time.time()
             available = [
@@ -382,7 +382,7 @@ class Worker:
 
         try:
             # 上报开始下载
-            self._status_queue.put({"task_id": task_id, "status": "downloading"})
+            self._status_queue.put({"task_id": task_id, "status": "downloading", "account_id": account_id})
 
             # 下载
             start_time = time.time()
@@ -400,7 +400,7 @@ class Worker:
             if ext.lower() in ("m4a", "mp4"):
                 logger.warning(f"  ⚠️  [{task_id}] 过滤: 跳过 M4A 格式")
                 os.unlink(file_path)
-                self._status_queue.put({"task_id": task_id, "status": "completed", "error_message": "Skipped M4A format"})
+                self._status_queue.put({"task_id": task_id, "status": "completed", "error_message": "Skipped M4A format", "account_id": account_id})
                 self.total_downloaded += 1
                 self.account_pool.report_success(account_id)
                 return
@@ -409,14 +409,14 @@ class Worker:
             if file_size <= 5 * 1024 * 1024:
                 logger.warning(f"  ⚠️  [{task_id}] 过滤: 文件小于等于 5MB ({file_size} 字节)")
                 os.unlink(file_path)
-                self._status_queue.put({"task_id": task_id, "status": "completed", "error_message": f"Skipped small file: {file_size} bytes"})
+                self._status_queue.put({"task_id": task_id, "status": "completed", "error_message": f"Skipped small file: {file_size} bytes", "account_id": account_id})
                 self.total_downloaded += 1
                 self.account_pool.report_success(account_id)
                 return
 
             s3_key = ""
             if self.uploader and self.uploader.enabled:
-                self._status_queue.put({"task_id": task_id, "status": "uploading"})
+                self._status_queue.put({"task_id": task_id, "status": "uploading", "account_id": account_id})
                 s3_key = self.uploader.build_s3_key(task, ext)
                 self.uploader.upload(file_path, s3_key)
                 os.unlink(file_path)
@@ -427,7 +427,7 @@ class Worker:
             self._status_queue.put({
                 "task_id": task_id, "status": "completed",
                 "file_size": file_size, "actual_quality": actual_quality,
-                "codec": codec, "s3_key": s3_key,
+                "codec": codec, "s3_key": s3_key, "account_id": account_id,
             })
 
             self.total_downloaded += 1

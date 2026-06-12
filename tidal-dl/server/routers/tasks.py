@@ -1,5 +1,6 @@
 """任务分配 + 状态上报 API"""
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from database import get_db_dependency
@@ -26,6 +27,7 @@ class TaskStatusUpdate(BaseModel):
 class TaskBatchUpdateItem(BaseModel):
     task_id: int
     status: str
+    account_id: Optional[int] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
     file_size: Optional[int] = None
@@ -247,15 +249,17 @@ def update_task_status_batch(data: TaskBatchUpdate, db=Depends(get_db_dependency
             cursor.execute(
                 "UPDATE tasks SET status = 'completed', file_size = %s, "
                 "actual_quality = %s, codec = %s, s3_key = %s, error_message = %s, "
+                "assigned_account_id = COALESCE(%s, assigned_account_id), "
                 "completed_at = NOW(), updated_at = NOW() WHERE id = %s",
-                (item.file_size, item.actual_quality, item.codec, item.s3_key, item.error_message, task_id)
+                (item.file_size, item.actual_quality, item.codec, item.s3_key, item.error_message, item.account_id, task_id)
             )
-            cursor.execute(
-                "UPDATE tidal_accounts SET total_downloads = total_downloads + 1, "
-                "rate_limit_count = 0, last_used_at = NOW() "
-                "WHERE id = (SELECT assigned_account_id FROM tasks WHERE id = %s)",
-                (task_id,)
-            )
+            if item.account_id:
+                cursor.execute(
+                    "UPDATE tidal_accounts SET total_downloads = total_downloads + 1, "
+                    "rate_limit_count = 0, last_used_at = NOW() "
+                    "WHERE id = %s",
+                    (item.account_id,)
+                )
         elif item.status == "failed":
             cursor.execute("SELECT retry_count, max_retries FROM tasks WHERE id = %s", (task_id,))
             task = cursor.fetchone()
@@ -302,4 +306,116 @@ def update_task_status_batch(data: TaskBatchUpdate, db=Depends(get_db_dependency
             
     db.commit()
     return {"message": "ok", "updated_count": len(data.updates)}
+
+
+# ========== 任务导出 ==========
+
+GROUP_SIZE = 50000
+
+@router.get("/export/groups")
+def get_export_groups(job_id: int, db=Depends(get_db_dependency)):
+    """获取指定批次已完成任务的分组信息（每5万条一组，按完成时间正序）"""
+    cursor = db.cursor()
+    cursor.execute(
+        "SELECT COUNT(*) as total FROM tasks WHERE status='completed' AND job_id = %s",
+        (job_id,)
+    )
+    total = cursor.fetchone()["total"]
+
+    if total == 0:
+        return {"total": 0, "groups": []}
+
+    groups = []
+    num_groups = (total + GROUP_SIZE - 1) // GROUP_SIZE
+
+    for i in range(num_groups):
+        offset = i * GROUP_SIZE
+        limit = min(GROUP_SIZE, total - offset)
+        cursor.execute(
+            "SELECT completed_at FROM ("
+            "  SELECT completed_at FROM tasks WHERE status='completed' AND job_id = %s "
+            "  ORDER BY completed_at ASC LIMIT %s OFFSET %s"
+            ") t ORDER BY completed_at DESC LIMIT 1",
+            (job_id, limit, offset)
+        )
+        oldest = cursor.fetchone()
+        cursor.execute(
+            "SELECT completed_at FROM tasks WHERE status='completed' AND job_id = %s "
+            "ORDER BY completed_at ASC LIMIT 1 OFFSET %s",
+            (job_id, offset)
+        )
+        newest = cursor.fetchone()
+
+        groups.append({
+            "group_index": i,
+            "offset": offset,
+            "count": limit,
+            "label": f"第 {i+1} 组 ({offset+1}-{offset+limit})",
+            "time_range_start": str(oldest["completed_at"]) if oldest else "",
+            "time_range_end": str(newest["completed_at"]) if newest else "",
+        })
+
+    return {"total": total, "group_size": GROUP_SIZE, "groups": groups}
+
+
+@router.get("/export/download")
+def export_download(job_id: int, group: int = 0, db=Depends(get_db_dependency)):
+    """导出指定批次、指定分组的已完成任务为 CSV"""
+    import csv
+    import io
+
+    cursor = db.cursor()
+    offset = group * GROUP_SIZE
+
+    cursor.execute(
+        "SELECT id, track_id, title, artist, album, isrc, actual_quality, codec, "
+        "file_size, s3_key, completed_at "
+        "FROM tasks WHERE status='completed' AND job_id = %s "
+        "ORDER BY completed_at ASC "
+        "LIMIT %s OFFSET %s",
+        (job_id, GROUP_SIZE, offset)
+    )
+    rows = cursor.fetchall()
+
+    def generate():
+        output = io.StringIO()
+        output.write('\ufeff')  # BOM for Excel
+        writer = csv.writer(output)
+        writer.writerow(["ID", "Track ID", "标题", "艺术家", "专辑", "ISRC",
+                         "音质", "编码", "文件大小(MB)", "S3路径", "下载链接", "完成时间"])
+        yield output.getvalue()
+        output.seek(0)
+        output.truncate(0)
+
+        for row in rows:
+            s3_key = row.get("s3_key") or ""
+            download_url = f"https://xiyaa.aybksd136.com/{s3_key}" if s3_key else ""
+            file_size_mb = round((row.get("file_size") or 0) / 1024 / 1024, 2)
+            writer.writerow([
+                row.get("id", ""),
+                row.get("track_id", ""),
+                row.get("title", ""),
+                row.get("artist", ""),
+                row.get("album", ""),
+                row.get("isrc") or "",
+                row.get("actual_quality") or "",
+                row.get("codec") or "",
+                file_size_mb,
+                s3_key,
+                download_url,
+                str(row.get("completed_at") or ""),
+            ])
+            yield output.getvalue()
+            output.seek(0)
+            output.truncate(0)
+
+    cursor.execute("SELECT name FROM jobs WHERE id = %s", (job_id,))
+    job = cursor.fetchone()
+    job_name = job["name"] if job else f"job_{job_id}"
+    filename = f"{job_name}_group_{group+1}.csv"
+    return StreamingResponse(
+        generate(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
