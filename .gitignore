@@ -1,0 +1,32 @@
+downloads/
+test_output/
+__pycache__/
+*.pyc
+.env
+*.log
+venv/
+
+# 敏感文件
+account
+account_cleaned.txt
+
+# 测试脚本
+test_*.py
+test_*.png
+
+# 大型数据文件
+*.csv
+*.json
+*.xlsx
+
+# 临时脚本
+batch_download.py
+download_actual.py
+download_test.py
+fast_download.py
+refactor_worker.py
+worker_main.py_backup
+build.req
+
+# IDE
+.gemini/
