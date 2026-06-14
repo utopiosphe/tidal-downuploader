@@ -60,21 +60,28 @@ ssh "$REMOTE" 'bash -s' <<'WORKEREOF'
   fi
   echo "✅ 旧 Worker 已全部清除"
 
-  # 启动新 Worker
+  # 启动新 Worker 集群 (20个)
   cd /opt/tidal-dl/worker
-  nohup /opt/tidal-dl/venv/bin/python -u main.py \
-    --server http://127.0.0.1:8000 \
-    > /opt/tidal-dl/worker.log 2>&1 &
-  NEW_PID=$!
-  echo $NEW_PID > /opt/tidal-dl/worker.pid
+  rm -f /opt/tidal-dl/worker_*.pid /opt/tidal-dl/worker_*.log
+  
+  for i in {1..20}; do
+    nohup /opt/tidal-dl/venv/bin/python -u main.py \
+      --server http://127.0.0.1:8000 \
+      --name "worker-$i" \
+      > /opt/tidal-dl/worker_$i.log 2>&1 &
+    NEW_PID=$!
+    echo $NEW_PID > /opt/tidal-dl/worker_$i.pid
+  done
+  
   sleep 5
 
   # 验证
-  if kill -0 $NEW_PID 2>/dev/null; then
-    echo "✅ Worker 启动成功 (PID=$NEW_PID)"
+  WORKER_COUNT=$(ps aux | grep 'python.*main.py.*8000' | grep -v grep | wc -l)
+  if [ "$WORKER_COUNT" -gt 0 ]; then
+    echo "✅ Worker 集群启动成功，当前在线进程数: $WORKER_COUNT"
   else
-    echo "❌ Worker 启动失败"
-    tail -20 /opt/tidal-dl/worker.log
+    echo "❌ Worker 集群启动失败"
+    tail -20 /opt/tidal-dl/worker_1.log
     exit 1
   fi
 

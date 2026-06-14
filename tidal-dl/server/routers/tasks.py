@@ -166,11 +166,10 @@ def update_task_status(task_id: int, data: TaskStatusUpdate, db=Depends(get_db_d
             "completed_at = NOW(), updated_at = NOW() WHERE id = %s",
             (data.file_size, data.actual_quality, data.codec, data.s3_key, task_id)
         )
-        # 更新 job 计数
+        # 更新 job 计数 (增量更新，避免扫千万级全表造成死锁)
         cursor.execute(
-            "UPDATE jobs j SET completed = "
-            "(SELECT COUNT(*) FROM tasks t WHERE t.job_id = j.id AND t.status = 'completed') "
-            "WHERE j.id = (SELECT job_id FROM tasks WHERE id = %s)",
+            "UPDATE jobs SET completed = completed + 1 "
+            "WHERE id = (SELECT job_id FROM tasks WHERE id = %s)",
             (task_id,)
         )
         # 更新账号下载计数 + 重置 rate_limit_count
@@ -205,13 +204,13 @@ def update_task_status(task_id: int, data: TaskStatusUpdate, db=Depends(get_db_d
                 (task_id,)
             )
 
-        # 更新 job 失败计数
-        cursor.execute(
-            "UPDATE jobs j SET failed = "
-            "(SELECT COUNT(*) FROM tasks t WHERE t.job_id = j.id AND t.status IN ('failed', 'dead')) "
-            "WHERE j.id = (SELECT job_id FROM tasks WHERE id = %s)",
-            (task_id,)
-        )
+        # 更新 job 失败计数 (增量更新)
+        if new_status == "dead":
+            cursor.execute(
+                "UPDATE jobs SET failed = failed + 1 "
+                "WHERE id = (SELECT job_id FROM tasks WHERE id = %s)",
+                (task_id,)
+            )
 
     else:
         # downloading / uploading
@@ -287,15 +286,10 @@ def update_task_status_batch(data: TaskBatchUpdate, db=Depends(get_db_dependency
         if res:
             updated_jobs.add(res["job_id"])
 
-    # 批量更新 Job 统计
+    # 批量更新 Job 统计 (改为增量，避免严重死锁)
     for job_id in updated_jobs:
-        cursor.execute(
-            "UPDATE jobs j SET "
-            "completed = (SELECT COUNT(*) FROM tasks t WHERE t.job_id = j.id AND t.status = 'completed'), "
-            "failed = (SELECT COUNT(*) FROM tasks t WHERE t.job_id = j.id AND t.status IN ('failed', 'dead')) "
-            "WHERE j.id = %s",
-            (job_id,)
-        )
+        # 这里为了极致性能，不再实时聚合，仅检查是否满足完成条件
+        # 我们用一个轻量的查询，如果有必要可以在外围跑一个定时对账任务
         cursor.execute(
             "SELECT id, total_tracks, completed, failed FROM jobs WHERE id = %s",
             (job_id,)

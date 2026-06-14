@@ -11,6 +11,7 @@ import logging
 import subprocess
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 ssl._create_default_https_context = ssl._create_unverified_context
 logger = logging.getLogger("worker.downloader")
@@ -127,7 +128,7 @@ def download_track(session: requests.Session, track_id: int,
 
 
 def _download_dash(session: requests.Session, manifest_b64: str) -> tuple:
-    """解析 DASH manifest 并下载"""
+    """解析 DASH manifest 并并发下载"""
     xml_str = base64.b64decode(manifest_b64).decode("utf-8")
     root = ET.fromstring(xml_str)
     ns = {"mpd": "urn:mpeg:dash:schema:mpd:2011"}
@@ -143,19 +144,41 @@ def _download_dash(session: requests.Session, manifest_b64: str) -> tuple:
             media_tmpl = seg.get("media")
             timeline = seg.find("mpd:SegmentTimeline", ns)
 
-            # 下载 init segment
-            all_data = bytearray(session.get(init_url, timeout=60).content)
-
+            # 收集所有需要下载的分段 URL
+            seg_urls = []
             if timeline is not None:
                 seg_num = 1
                 for s in timeline.findall("mpd:S", ns):
                     r_val = s.get("r")
                     repeat = int(r_val) + 1 if r_val is not None else 1
                     for _ in range(repeat):
-                        seg_url = media_tmpl.replace("$Number$", str(seg_num))
-                        seg_data = session.get(seg_url, timeout=120).content
-                        all_data.extend(seg_data)
+                        seg_urls.append((seg_num, media_tmpl.replace("$Number$", str(seg_num))))
                         seg_num += 1
+
+            # 结果数组
+            results = {0: session.get(init_url, timeout=60).content}
+
+            def fetch_seg(num, url):
+                for _ in range(3):
+                    try:
+                        resp = session.get(url, timeout=60)
+                        resp.raise_for_status()
+                        return num, resp.content
+                    except Exception as e:
+                        logger.warning(f"Segment {num} fetch failed, retrying: {e}")
+                raise DownloadError(f"Segment {num} failed after 3 retries")
+
+            # 并发下载
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {executor.submit(fetch_seg, num, url): num for num, url in seg_urls}
+                for future in as_completed(futures):
+                    num, data = future.result()
+                    results[num] = data
+
+            # 按顺序组装
+            all_data = bytearray()
+            for i in range(len(results)):
+                all_data.extend(results[i])
 
             return bytes(all_data), codec
 

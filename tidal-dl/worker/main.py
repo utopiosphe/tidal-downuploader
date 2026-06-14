@@ -59,7 +59,7 @@ class AccountPool:
 
     def pick(self) -> dict | None:
         """选择最优账号（最闲 + 不在冷却中 + 不超过最大并发）"""
-        MAX_PER_ACCOUNT = 10
+        MAX_PER_ACCOUNT = 30
         with self._lock:
             now = time.time()
             available = [
@@ -288,7 +288,7 @@ class Worker:
         logger.info(f"🚀 开始工作循环 (并发: {self.max_concurrency})")
 
         self._semaphore = threading.Semaphore(self.max_concurrency)
-        self._executor = ThreadPoolExecutor(max_workers=200)
+        self._executor = ThreadPoolExecutor(max_workers=1000)
         self._task_queue = Queue()
 
         while self.running:
