@@ -9,6 +9,7 @@
     <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
     <script src="https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js"></script>
     <script src="https://unpkg.com/naive-ui@2.38.1/dist/index.prod.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -258,7 +259,9 @@ function fmtBytes(b) {
     if (b < 1024) return b + ' B';
     if (b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
     if (b < 1024*1024*1024) return (b/1024/1024).toFixed(1) + ' MB';
-    return (b/1024/1024/1024).toFixed(2) + ' GB';
+    if (b < 1024*1024*1024*1024) return (b/1024/1024/1024).toFixed(2) + ' GB';
+    if (b < 1024*1024*1024*1024*1024) return (b/1024/1024/1024/1024).toFixed(2) + ' TB';
+    return (b/1024/1024/1024/1024/1024).toFixed(2) + ' PB';
 }
 
 function fmtTime(t) {
@@ -372,6 +375,7 @@ const Jobs = {
                     <span :class="'badge badge-' + job.status" style="margin-left:10px">{{ job.status }}</span>
                 </div>
                 <div style="display:flex;gap:8px">
+                    <button class="btn btn-sm" style="background:rgba(124,58,237,0.15);color:#a78bfa" @click="openTrend(job.id, job.name)" v-if="job.completed > 0">📈 趋势</button>
                     <button class="btn btn-sm" style="background:rgba(74,222,128,0.15);color:#4ade80" @click="loadExportGroups(job.id, job.name)" v-if="job.completed > 0">📥 导出</button>
                     <button class="btn btn-sm btn-warning" @click="retryFailed(job.id)" v-if="job.failed > 0">🔄 重试失败</button>
                     <button class="btn btn-sm btn-danger" @click="pauseJob(job.id)" v-if="job.status === 'running'">⏸ 暂停</button>
@@ -383,6 +387,7 @@ const Jobs = {
                 <span>完成: <b style="color:#4ade80">{{ job.completed?.toLocaleString() }}</b></span>
                 <span>失败: <b style="color:#f87171">{{ job.failed }}</b></span>
                 <span>进行中: <b style="color:#60a5fa">{{ job.active_count || 0 }}</b></span>
+                <span v-if="job.total_bytes">已下载: <b style="color:#a78bfa">{{ fmtBytes(job.total_bytes) }}</b></span>
                 <span>创建: {{ fmtTime(job.created_at) }}</span>
             </div>
             <div class="progress-bar">
@@ -421,27 +426,100 @@ const Jobs = {
 
         <!-- Export Modal -->
         <div class="modal-overlay" v-if="showExport" @click.self="showExport = false">
-            <div class="modal">
-                <div class="modal-title">📥 导出已完成任务 - {{ exportJobName }}</div>
+            <div class="modal" style="max-width:920px;width:90vw">
+                <div class="modal-title" style="display:flex;justify-content:space-between;align-items:center">
+                    <span>📥 导出已完成任务 - {{ exportJobName }}</span>
+                    <button class="btn btn-sm" style="background:rgba(167,139,250,0.15);color:#a78bfa;font-size:12px" @click="refreshExportGroups" :disabled="exportRefreshing">
+                        {{ exportRefreshing ? '刷新中...' : '🔄 刷新分组' }}
+                    </button>
+                </div>
                 <div v-if="exportLoading" style="text-align:center;padding:20px;color:#888">加载中...</div>
-                <div v-else-if="exportGroups.length === 0" style="text-align:center;padding:20px;color:#888">暂无已完成任务</div>
+                <div v-else-if="exportGroups.length === 0" style="text-align:center;padding:20px;color:#888">暂无分组数据，请点击"刷新分组"生成</div>
                 <div v-else>
-                    <div style="margin-bottom:12px;color:#888;font-size:13px">共 {{ exportTotal.toLocaleString() }} 条已完成，每 50,000 条一组（按完成时间倒序）</div>
-                    <div v-for="g in exportGroups" :key="g.group_index" 
-                         style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;margin-bottom:8px;background:rgba(255,255,255,0.04);border-radius:8px;border:1px solid rgba(255,255,255,0.06)">
-                        <div>
-                            <div style="font-weight:600;color:#e0e0e0;margin-bottom:4px">{{ g.label }}</div>
-                            <div style="font-size:11px;color:#666">{{ g.time_range_end?.slice(0,16) }} ~ {{ g.time_range_start?.slice(0,16) }}</div>
-                        </div>
-                        <div style="display:flex;align-items:center;gap:8px">
-                            <span style="font-size:12px;color:#888">{{ g.count.toLocaleString() }} 条</span>
-                            <button class="btn btn-sm btn-primary" @click="downloadGroup(g.group_index)">⬇ 下载 CSV</button>
+                    <div style="margin-bottom:10px;color:#888;font-size:13px">共 {{ exportTotal.toLocaleString() }} 条已完成，总大小 <b style="color:#a78bfa">{{ fmtBytes(exportTotalSize) }}</b>，每 50,000 条一组</div>
+                    <div style="display:flex;align-items:center;padding:4px 10px;font-size:11px;color:#555;border-bottom:1px solid rgba(255,255,255,0.06);margin-bottom:2px">
+                        <span style="width:180px">分组</span>
+                        <span style="width:190px">时间范围</span>
+                        <span style="width:70px;text-align:right">大小</span>
+                        <span style="width:70px;text-align:right">数量</span>
+                        <span style="flex:1;text-align:center">S3 状态</span>
+                        <span style="width:130px;text-align:right">操作</span>
+                    </div>
+                    <div style="max-height:560px;overflow-y:auto">
+                        <div v-for="g in exportGroups" :key="g.id" 
+                             style="display:flex;align-items:center;padding:6px 10px;margin-bottom:1px;background:rgba(255,255,255,0.02);border-radius:4px;font-size:12px"
+                             :style="g.group_index % 2 === 0 ? 'background:rgba(255,255,255,0.03)' : ''">
+                            <div style="width:180px">
+                                <span style="color:#e0e0e0;font-weight:500">第 {{ g.group_index + 1 }} 组</span>
+                                <span style="color:#555;font-size:10px;margin-left:2px">({{ (g.group_index * 50000 + 1).toLocaleString() }}-{{ (g.group_index * 50000 + g.task_count).toLocaleString() }})</span>
+                            </div>
+                            <div style="width:190px;font-size:10px;color:#666">{{ (g.time_range_start || '').slice(5,16) }} ~ {{ (g.time_range_end || '').slice(5,16) }}</div>
+                            <div style="width:70px;text-align:right;color:#4ade80;font-weight:600;font-size:11px">{{ fmtBytes(g.total_size) }}</div>
+                            <div style="width:70px;text-align:right;color:#888;font-size:11px">{{ g.task_count.toLocaleString() }}</div>
+                            <div style="flex:1;text-align:center">
+                                <span v-if="g.s3_cleanup_status === 'none'" style="font-size:10px;color:#555;background:rgba(255,255,255,0.04);padding:1px 6px;border-radius:3px">未清理</span>
+                                <span v-else-if="g.s3_cleanup_status === 'pending'" style="font-size:10px;color:#eab308;background:rgba(234,179,8,0.1);padding:1px 6px;border-radius:3px">等待中</span>
+                                <span v-else-if="g.s3_cleanup_status === 'running'" style="font-size:10px;color:#60a5fa;background:rgba(96,165,250,0.1);padding:1px 6px;border-radius:3px">🔄 {{ g.s3_cleaned_count }}/{{ g.task_count }}</span>
+                                <span v-else-if="g.s3_cleanup_status === 'completed'" style="font-size:10px;color:#4ade80;background:rgba(74,222,128,0.1);padding:1px 6px;border-radius:3px">✅ 已清理</span>
+                                <span v-else-if="g.s3_cleanup_status === 'failed'" style="font-size:10px;color:#f87171;background:rgba(248,113,113,0.1);padding:1px 6px;border-radius:3px">❌ 失败</span>
+                            </div>
+                            <div style="width:130px;display:flex;gap:4px;justify-content:flex-end">
+                                <button class="btn btn-sm btn-primary" @click="downloadGroup(g.group_index)" style="font-size:10px;padding:2px 7px">⬇ CSV</button>
+                                <button class="btn btn-sm" style="background:rgba(248,113,113,0.15);color:#f87171;font-size:10px;padding:2px 7px" 
+                                        @click="confirmCleanup(g)" :disabled="g.s3_cleanup_status === 'running' || g.s3_cleanup_status === 'pending'"
+                                        v-if="g.s3_cleanup_status !== 'completed'">🗑️ 清理</button>
+                                <button class="btn btn-sm" style="background:rgba(248,113,113,0.15);color:#f87171;font-size:10px;padding:2px 7px" 
+                                        @click="confirmCleanup(g)" v-if="g.s3_cleanup_status === 'failed'">🔄</button>
+                            </div>
                         </div>
                     </div>
                 </div>
                 <div style="display:flex;justify-content:flex-end;margin-top:16px">
                     <button class="btn" style="background:rgba(255,255,255,0.06);color:#888" @click="showExport = false">关闭</button>
                 </div>
+            </div>
+        </div>
+
+        <!-- Cleanup Confirm Modal -->
+        <div class="modal-overlay" v-if="showCleanupConfirm" @click.self="showCleanupConfirm = false">
+            <div class="modal" style="max-width:420px">
+                <div class="modal-title" style="color:#f87171">⚠️ 确认清理 S3 资源</div>
+                <div style="color:#ccc;font-size:14px;line-height:1.8;margin:12px 0">
+                    将永久删除 <b style="color:#f87171">第 {{ cleanupTarget?.group_index + 1 }} 组</b> 的 
+                    <b style="color:#f87171">{{ cleanupTarget?.task_count?.toLocaleString() }}</b> 个 S3 文件（共 {{ fmtBytes(cleanupTarget?.total_size) }}）。
+                    <br><br>此操作<b style="color:#f87171">不可撤销</b>，请确认。
+                </div>
+                <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+                    <button class="btn" style="background:rgba(255,255,255,0.06);color:#888" @click="showCleanupConfirm = false">取消</button>
+                    <button class="btn" style="background:rgba(248,113,113,0.2);color:#f87171" @click="doCleanup">确认删除</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Trend Modal -->
+        <div class="modal-overlay" v-if="showTrend" @click.self="closeTrend">
+            <div class="modal" style="max-width:1100px;width:92vw">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+                    <div class="modal-title" style="margin-bottom:0">📈 {{ trendJobName }} - 趋势</div>
+                    <button class="btn btn-sm" style="background:rgba(255,255,255,0.06);color:#888;font-size:18px;padding:4px 10px" @click="closeTrend">✕</button>
+                </div>
+                <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+                    <span style="color:#94a3b8;font-size:13px">时间范围:</span>
+                    <button v-for="h in [6, 24, 72, 168]" :key="h"
+                            class="btn btn-sm" @click="trendHours = h; fetchTrend()"
+                            :style="trendHours === h ? 'background:rgba(139,92,246,0.25);color:#a78bfa' : 'background:rgba(255,255,255,0.06);color:#888'">
+                        {{ h <= 24 ? h + 'h' : (h/24) + '天' }}
+                    </button>
+                    <input type="number" v-model.number="trendHours" min="1" max="720" style="width:60px;background:rgba(255,255,255,0.06);color:#e0e0e0;border:1px solid rgba(255,255,255,0.1);border-radius:6px;padding:4px 8px;font-size:13px;text-align:center" @keyup.enter="fetchTrend()">
+                    <span style="color:#94a3b8;font-size:13px">小时</span>
+                    <button class="btn btn-sm" style="background:rgba(37,99,235,0.2);color:#60a5fa" @click="fetchTrend()">确认</button>
+                    <span v-if="trendLoading" style="color:#888;font-size:12px">加载中...</span>
+                    <span v-else-if="trendCached" style="color:#666;font-size:11px">⚡ 缓存</span>
+                </div>
+                <div style="position:relative;height:400px">
+                    <canvas ref="trendCanvas"></canvas>
+                </div>
+                <div v-if="!trendLoading && trendData.length === 0" style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#666">暂无趋势数据</div>
             </div>
         </div>
     </div>`,
@@ -455,11 +533,177 @@ const Jobs = {
         const showExport = ref(false);
         const exportGroups = ref([]);
         const exportTotal = ref(0);
+        const exportTotalSize = ref(0);
         const exportLoading = ref(false);
         const exportJobId = ref(0);
         const exportJobName = ref('');
 
+        // 趋势图
+        const showTrend = ref(false);
+        const trendJobId = ref(0);
+        const trendJobName = ref('');
+        const trendHours = ref(24);
+        const trendLoading = ref(false);
+        const trendCached = ref(false);
+        const trendData = ref([]);
+        const trendCanvas = ref(null);
+        let trendChart = null;
+
         const load = async () => { try { jobs.value = await api('/jobs'); } catch(e) {} };
+
+        // 趋势图
+        const autoUnit = (bytes) => {
+            if (bytes >= 1024**4) return { div: 1024**4, unit: 'TB' };
+            if (bytes >= 1024**3) return { div: 1024**3, unit: 'GB' };
+            if (bytes >= 1024**2) return { div: 1024**2, unit: 'MB' };
+            if (bytes >= 1024)    return { div: 1024,    unit: 'KB' };
+            return { div: 1, unit: 'B' };
+        };
+
+        const openTrend = (jobId, jobName) => {
+            trendJobId.value = jobId;
+            trendJobName.value = jobName || 'Job ' + jobId;
+            trendHours.value = 24;
+            showTrend.value = true;
+            Vue.nextTick(() => fetchTrend());
+        };
+
+        const closeTrend = () => {
+            showTrend.value = false;
+            if (trendChart) { trendChart.destroy(); trendChart = null; }
+        };
+
+        const fetchTrend = async () => {
+            trendLoading.value = true;
+            try {
+                const data = await api('/tasks/trend?job_id=' + trendJobId.value + '&hours=' + trendHours.value);
+                trendData.value = data.buckets || [];
+                trendCached.value = !!data.cached;
+                Vue.nextTick(() => renderTrend());
+            } catch(e) {
+                showToast('加载趋势失败: ' + e.message, 'error');
+            }
+            trendLoading.value = false;
+        };
+
+        const renderTrend = () => {
+            if (!trendCanvas.value || trendData.value.length === 0) return;
+            if (trendChart) trendChart.destroy();
+
+            const labels = trendData.value.map(d => {
+                // 简化时间标签：只显示 HH:MM 或 MM-DD HH:MM
+                const t = d.time;
+                return t.length > 11 ? t.slice(5) : t;
+            });
+            const completed = trendData.value.map(d => d.completed);
+            const failed = trendData.value.map(d => d.failed);
+            const cumCompleted = trendData.value.map(d => d.cum_completed);
+            const sizeRaw = trendData.value.map(d => d.size);
+            const cumSizeRaw = trendData.value.map(d => d.cum_size);
+
+            // 自动选择大小单位
+            const sUnit = autoUnit(Math.max(...sizeRaw.filter(v => v > 0), 1));
+            const csUnit = autoUnit(Math.max(...cumSizeRaw.filter(v => v > 0), 1));
+            const sizeScaled = sizeRaw.map(v => +(v / sUnit.div).toFixed(2));
+
+            const ctx = trendCanvas.value.getContext('2d');
+            trendChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [
+                        {
+                            label: '完成数 (增量)',
+                            data: completed,
+                            borderColor: '#4ade80',
+                            backgroundColor: 'rgba(74,222,128,0.1)',
+                            yAxisID: 'yIncr',
+                            tension: 0.3,
+                            pointRadius: 2,
+                            fill: true,
+                            order: 2
+                        },
+                        {
+                            label: '失败数 (增量)',
+                            data: failed,
+                            borderColor: '#f87171',
+                            backgroundColor: 'rgba(248,113,113,0.3)',
+                            yAxisID: 'yIncr',
+                            tension: 0.3,
+                            pointRadius: 2,
+                            fill: true,
+                            order: 1
+                        },
+                        {
+                            label: '数据量 (' + sUnit.unit + ')',
+                            data: sizeScaled,
+                            borderColor: '#38bdf8',
+                            backgroundColor: 'rgba(56,189,248,0.08)',
+                            yAxisID: 'yIncr',
+                            tension: 0.3,
+                            pointRadius: 1,
+                            fill: true,
+                            order: 3
+                        },
+                        {
+                            label: '累计完成',
+                            data: cumCompleted,
+                            borderColor: '#facc15',
+                            borderDash: [6, 3],
+                            yAxisID: 'yCum',
+                            tension: 0.3,
+                            pointRadius: 0,
+                            order: 4
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    plugins: {
+                        legend: { labels: { color: '#e2e8f0', font: { size: 12 } } },
+                        tooltip: {
+                            backgroundColor: '#1e293b',
+                            borderColor: '#334155',
+                            borderWidth: 1,
+                            callbacks: {
+                                afterBody: (items) => {
+                                    const idx = items[0]?.dataIndex;
+                                    if (idx !== undefined) {
+                                        const d = trendData.value[idx];
+                                        const cs = autoUnit(d.cum_size);
+                                        return '累计数据量: ' + (d.cum_size / cs.div).toFixed(2) + ' ' + cs.unit;
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#94a3b8', font: { size: 10 }, maxTicksLimit: 15, maxRotation: 0 },
+                            grid: { color: 'rgba(51,65,85,.4)' }
+                        },
+                        yIncr: {
+                            type: 'linear',
+                            position: 'left',
+                            title: { display: true, text: '增量', color: '#4ade80' },
+                            ticks: { color: '#4ade80' },
+                            grid: { color: 'rgba(51,65,85,.3)' },
+                            beginAtZero: true
+                        },
+                        yCum: {
+                            type: 'linear',
+                            position: 'right',
+                            title: { display: true, text: '累计完成', color: '#facc15' },
+                            ticks: { color: '#facc15' },
+                            grid: { drawOnChartArea: false },
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        };
 
         const onFileSelect = (e) => { importFile.value = e.target.files[0]; };
         const onDrop = (e) => { importFile.value = e.dataTransfer.files[0]; };
@@ -500,22 +744,75 @@ const Jobs = {
             showExport.value = true;
             exportLoading.value = true;
             try {
-                const data = await api('/tasks/export/groups?job_id=' + jobId);
+                const data = await api('/exports/groups?job_id=' + jobId);
                 exportGroups.value = data.groups || [];
                 exportTotal.value = data.total || 0;
+                exportTotalSize.value = data.total_size || 0;
             } catch(e) {
                 showToast('加载分组失败: ' + e.message, 'error');
             }
             exportLoading.value = false;
         };
+        const refreshExportGroups = async () => {
+            exportRefreshing.value = true;
+            try {
+                await api('/exports/groups/refresh?job_id=' + exportJobId.value, { method: 'POST' });
+                await loadExportGroups(exportJobId.value, exportJobName.value);
+                showToast('分组刷新完成');
+            } catch(e) {
+                showToast('刷新失败: ' + e.message, 'error');
+            }
+            exportRefreshing.value = false;
+        };
         const downloadGroup = (groupIndex) => {
-            window.open(API + '/tasks/export/download?job_id=' + exportJobId.value + '&group=' + groupIndex, '_blank');
+            window.open(API + '/exports/groups/download?job_id=' + exportJobId.value + '&group=' + groupIndex, '_blank');
+        };
+
+        // S3 清理
+        const showCleanupConfirm = ref(false);
+        const cleanupTarget = ref(null);
+        const exportRefreshing = ref(false);
+        const confirmCleanup = (group) => {
+            cleanupTarget.value = group;
+            showCleanupConfirm.value = true;
+        };
+        const doCleanup = async () => {
+            showCleanupConfirm.value = false;
+            const g = cleanupTarget.value;
+            if (!g) return;
+            try {
+                await api('/exports/groups/' + g.id + '/cleanup', { method: 'POST' });
+                showToast('清理任务已启动');
+                g.s3_cleanup_status = 'pending';
+                // 轮询状态
+                pollCleanupStatus(g);
+            } catch(e) {
+                showToast('清理启动失败: ' + e.message, 'error');
+            }
+        };
+        const pollCleanupStatus = (g) => {
+            const iv = setInterval(async () => {
+                try {
+                    const st = await api('/exports/groups/' + g.id + '/cleanup-status');
+                    g.s3_cleanup_status = st.s3_cleanup_status;
+                    g.s3_cleaned_count = st.s3_cleaned_count;
+                    if (st.s3_cleanup_status === 'completed' || st.s3_cleanup_status === 'failed') {
+                        clearInterval(iv);
+                        if (st.s3_cleanup_status === 'completed') showToast('✅ S3 清理完成！删除 ' + st.s3_cleaned_count + ' 个文件');
+                        else showToast('❌ S3 清理失败', 'error');
+                    }
+                } catch(e) { clearInterval(iv); }
+            }, 3000);
         };
 
         let timer;
         onMounted(() => { load(); timer = setInterval(load, 15000); });
         onUnmounted(() => clearInterval(timer));
-        return { jobs, showImport, showExport, exportGroups, exportTotal, exportLoading, exportJobName, importName, importFile, importing, onFileSelect, onDrop, doImport, retryFailed, pauseJob, resumeJob, loadExportGroups, downloadGroup, fmtBytes, fmtTime };
+        return { jobs, showImport, showExport, exportGroups, exportTotal, exportTotalSize, exportLoading, exportJobName,
+                 showTrend, trendJobName, trendHours, trendLoading, trendCached, trendData, trendCanvas,
+                 importName, importFile, importing, onFileSelect, onDrop, doImport, retryFailed, pauseJob, resumeJob,
+                 loadExportGroups, downloadGroup, openTrend, closeTrend, fetchTrend, fmtBytes, fmtTime,
+                 refreshExportGroups, exportRefreshing, showCleanupConfirm, cleanupTarget, confirmCleanup, doCleanup };
     }
 };
 
@@ -1093,35 +1390,78 @@ const Config = {
         </div>
 
         <div class="card">
-            <div class="card-title">☁️ S3 存储配置</div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label class="form-label">Endpoint</label>
-                    <input class="form-input" v-model="cfg.s3.endpoint" placeholder="https://s3.amazonaws.com">
-                </div>
-                <div class="form-group">
-                    <label class="form-label">Bucket</label>
-                    <input class="form-input" v-model="cfg.s3.bucket">
-                </div>
+            <div class="card-title" style="display:flex;justify-content:space-between;align-items:center">
+                <span>☁️ S3 存储配置</span>
+                <button class="btn btn-sm" style="background:rgba(124,58,237,0.15);color:#a78bfa" @click="addStorage">+ 添加存储</button>
             </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label class="form-label">Access Key</label>
-                    <input class="form-input" v-model="cfg.s3.access_key">
+            <div v-for="(s, idx) in cfg.s3" :key="idx" style="border:1px solid rgba(255,255,255,0.06);border-radius:8px;padding:14px;margin-bottom:12px;position:relative"
+                 :style="{opacity: s.enabled ? 1 : 0.5}">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+                    <div style="display:flex;align-items:center;gap:10px">
+                        <span style="font-size:14px;font-weight:600;color:#e0e0e0">{{ s.name || '存储 ' + (idx+1) }}</span>
+                        <span style="font-size:10px;padding:2px 8px;border-radius:4px"
+                              :style="s.provider==='gcs'?'background:rgba(66,133,244,0.15);color:#4285f4':'background:rgba(255,153,0,0.15);color:#ff9900'">
+                            {{ s.provider === 'gcs' ? 'Google Cloud' : 'AWS S3' }}
+                        </span>
+                        <span v-if="storageStats[s.id]" style="font-size:11px;color:#888">
+                            📊 {{ fmtBytes(storageStats[s.id]?.total_size || 0) }} / {{ (storageStats[s.id]?.file_count || 0).toLocaleString() }} 文件
+                        </span>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center">
+                        <label style="font-size:12px;color:#888;display:flex;align-items:center;gap:4px;cursor:pointer">
+                            <input type="checkbox" v-model="s.enabled"> 启用
+                        </label>
+                        <button class="btn btn-sm" style="background:rgba(239,68,68,0.15);color:#f87171;font-size:11px" @click="cfg.s3.splice(idx,1)">删除</button>
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label class="form-label">Secret Key</label>
-                    <input class="form-input" v-model="cfg.s3.secret_key" type="password">
+                <div class="form-row">
+                    <div class="form-group" style="flex:0 0 100px">
+                        <label class="form-label">ID</label>
+                        <input class="form-input" v-model="s.id" style="font-size:12px">
+                    </div>
+                    <div class="form-group" style="flex:0 0 120px">
+                        <label class="form-label">名称</label>
+                        <input class="form-input" v-model="s.name" style="font-size:12px">
+                    </div>
+                    <div class="form-group" style="flex:0 0 100px">
+                        <label class="form-label">Provider</label>
+                        <select class="form-input" v-model="s.provider" style="font-size:12px">
+                            <option value="aws">AWS</option>
+                            <option value="gcs">GCS</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Endpoint</label>
+                        <input class="form-input" v-model="s.endpoint" style="font-size:12px">
+                    </div>
                 </div>
-            </div>
-            <div class="form-row">
-                <div class="form-group">
-                    <label class="form-label">Region</label>
-                    <input class="form-input" v-model="cfg.s3.region" placeholder="us-east-1">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Bucket</label>
+                        <input class="form-input" v-model="s.bucket" style="font-size:12px">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Region</label>
+                        <input class="form-input" v-model="s.region" style="font-size:12px">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">前缀</label>
+                        <input class="form-input" v-model="s.prefix" style="font-size:12px">
+                    </div>
                 </div>
-                <div class="form-group">
-                    <label class="form-label">路径前缀</label>
-                    <input class="form-input" v-model="cfg.s3.prefix" placeholder="flac/">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Access Key</label>
+                        <input class="form-input" v-model="s.access_key" style="font-size:12px">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Secret Key</label>
+                        <input class="form-input" v-model="s.secret_key" type="password" style="font-size:12px">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">下载域名</label>
+                        <input class="form-input" v-model="s.download_domain" placeholder="https://example.com" style="font-size:12px">
+                    </div>
                 </div>
             </div>
         </div>
@@ -1176,18 +1516,51 @@ const Config = {
     setup() {
         const cfg = reactive({
             proxy: { host: '', socks5_port: 41003, http_port: 41002, username: '', password: '', protocol: 'socks5' },
-            s3: { endpoint: '', access_key: '', secret_key: '', bucket: '', region: '', prefix: 'flac/' },
+            s3: [],
             download: { quality: 'LOSSLESS', concurrency: 10, max_retries: 3, retry_delay: 5, rate_limit_delay: 30, task_timeout: 300, country_code: 'NG' },
         });
         const saving = ref(false);
+        const storageStats = ref({});
 
         const load = async () => {
             try {
                 const data = await api('/config');
                 if (data.proxy) Object.assign(cfg.proxy, data.proxy);
-                if (data.s3) Object.assign(cfg.s3, data.s3);
+                if (data.s3) {
+                    // 兼容旧 dict 格式
+                    cfg.s3 = Array.isArray(data.s3) ? data.s3 : [data.s3];
+                    // 确保每项有默认字段
+                    cfg.s3.forEach(s => {
+                        s.id = s.id || 'default';
+                        s.name = s.name || '';
+                        s.provider = s.provider || 'aws';
+                        s.enabled = s.enabled !== false;
+                        s.download_domain = s.download_domain || '';
+                    });
+                }
                 if (data.download) Object.assign(cfg.download, data.download);
             } catch(e) {}
+            // 加载存储统计
+            try {
+                const stats = await api('/exports/storage-stats');
+                storageStats.value = stats;
+            } catch(e) {}
+        };
+
+        const addStorage = () => {
+            cfg.s3.push({
+                id: 'storage-' + (cfg.s3.length + 1),
+                name: '新存储',
+                provider: 'aws',
+                enabled: true,
+                endpoint: '',
+                access_key: '',
+                secret_key: '',
+                bucket: '',
+                region: '',
+                prefix: 'tidal-flac/',
+                download_domain: ''
+            });
         };
 
         const save = async () => {
@@ -1200,7 +1573,7 @@ const Config = {
         };
 
         onMounted(load);
-        return { cfg, saving, save };
+        return { cfg, saving, save, addStorage, storageStats, fmtBytes };
     }
 };
 

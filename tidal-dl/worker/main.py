@@ -16,7 +16,7 @@ from downloader import (
     TokenExpiredError, AccountBannedError, TrackNotFoundError,
     RateLimitError, DownloadError
 )
-from uploader import S3Uploader
+from uploader import MultiUploader
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,8 +69,9 @@ class AccountPool:
             ]
             if not available:
                 return None
-            # 按活跃任务数排序，最闲的优先
-            available.sort(key=lambda a: self.active_tasks.get(a["id"], 0))
+            # 按活跃任务数排序 + 随机打散（同等活跃度的账号随机选，确保均匀使用）
+            import random
+            available.sort(key=lambda a: (self.active_tasks.get(a["id"], 0), random.random()))
             best = available[0]
             # 即选即锁定
             self.active_tasks[best["id"]] = self.active_tasks.get(best["id"], 0) + 1
@@ -124,9 +125,9 @@ class Worker:
         self.worker_id = None
         self.config = {}
         self.proxy_config = {}
-        self.s3_config = {}
+        self.s3_configs = []
         self.download_config = {}
-        self.uploader = None
+        self.uploader = None  # MultiUploader
         self.download_session = None
         self.account_pool = AccountPool()
 
@@ -177,15 +178,16 @@ class Worker:
         """从 Server 加载配置 + 账号列表"""
         config = self.server.get_config(self.worker_id)
         self.proxy_config = config.get("proxy", {})
-        self.s3_config = config.get("s3", {})
+        s3_raw = config.get("s3", [])
+        self.s3_configs = s3_raw if isinstance(s3_raw, list) else [s3_raw]
         self.download_config = config.get("download", {})
         self.max_concurrency = config.get("concurrency", self.max_concurrency)
 
         # 初始化代理 session
         self.download_session = build_session(self.proxy_config)
 
-        # 初始化 S3
-        self.uploader = S3Uploader(self.s3_config)
+        # 初始化多存储 S3
+        self.uploader = MultiUploader(self.s3_configs)
 
         # 初始化账号池
         try:
@@ -197,7 +199,7 @@ class Worker:
 
         proxy_label = self.proxy_config.get("host", "直连")
         logger.info(f"📋 配置: 并发={self.max_concurrency}, 代理={proxy_label}, "
-                     f"S3={'启用' if self.uploader.enabled else '未配置'}")
+                     f"存储={len(self.uploader.uploaders)}个")
 
     def _heartbeat_loop(self):
         """心跳线程 - 每 10 秒上报 + 同步配置"""
@@ -241,13 +243,13 @@ class Worker:
             self.proxy_config = new_proxy
             self.download_session = build_session(self.proxy_config)
 
-        # S3 变更
-        new_s3 = config.get("s3", {})
-        if new_s3.get("bucket") != self.s3_config.get("bucket") or \
-           new_s3.get("endpoint") != self.s3_config.get("endpoint"):
-            logger.info(f"🔄 S3 配置变更")
-            self.s3_config = new_s3
-            self.uploader = S3Uploader(self.s3_config)
+        # S3 变更（多存储热更新）
+        new_s3 = config.get("s3", [])
+        new_s3_list = new_s3 if isinstance(new_s3, list) else [new_s3]
+        if new_s3_list != self.s3_configs:
+            logger.info(f"🔄 S3 配置变更，更新存储列表")
+            self.s3_configs = new_s3_list
+            self.uploader.update(self.s3_configs)
 
         # 下载配置
         self.download_config = config.get("download", self.download_config)
@@ -349,22 +351,23 @@ class Worker:
             self._semaphore.release()
 
     def update_concurrency(self, new_concurrency):
-        """动态调整并发数（热更新）"""
-        import threading
+        """动态调整并发数（热更新）- 不重建 Semaphore，避免主循环阻塞"""
         old = self.max_concurrency
         if new_concurrency == old:
             return
         self.max_concurrency = new_concurrency
+        diff = new_concurrency - old
 
-        # 重建 semaphore
-        old_sem = self._semaphore
-        self._semaphore = threading.Semaphore(new_concurrency)
-        # 把正在跑的任务数扣除
-        running = self.active_tasks
-        for _ in range(running):
-            self._semaphore.acquire(blocking=False)
+        if diff > 0:
+            # 增加并发：多释放 diff 个信号量，让主循环能 acquire 到更多
+            for _ in range(diff):
+                self._semaphore.release()
+        else:
+            # 减少并发：尝试 acquire 掉多余的信号量（非阻塞，拿不到就算了，自然会收缩）
+            for _ in range(-diff):
+                self._semaphore.acquire(blocking=False)
 
-        logger.info(f"🔧 并发数调整: {old} → {new_concurrency} (活跃: {running})")
+        logger.info(f"🔧 并发数调整: {old} → {new_concurrency} (差值: {diff:+d})")
 
     def _process_task(self, task: dict, account: dict):
         """处理单个下载任务"""
@@ -415,19 +418,20 @@ class Worker:
                 return
 
             s3_key = ""
+            storage_id = ""
             if self.uploader and self.uploader.enabled:
                 self._status_queue.put({"task_id": task_id, "status": "uploading", "account_id": account_id})
-                s3_key = self.uploader.build_s3_key(task, ext)
-                self.uploader.upload(file_path, s3_key)
+                storage_id, s3_key = self.uploader.upload(file_path, task, ext)
                 os.unlink(file_path)
             else:
                 s3_key = file_path
 
-            # 上报完成
+            # 上报完成（含 storage_id）
             self._status_queue.put({
                 "task_id": task_id, "status": "completed",
                 "file_size": file_size, "actual_quality": actual_quality,
                 "codec": codec, "s3_key": s3_key, "account_id": account_id,
+                "storage_id": storage_id,
             })
 
             self.total_downloaded += 1

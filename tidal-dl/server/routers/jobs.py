@@ -10,15 +10,33 @@ router = APIRouter(prefix="/api/jobs", tags=["Jobs"])
 
 @router.get("")
 def list_jobs(db=Depends(get_db_dependency)):
-    """获取所有任务批次"""
+    """获取所有任务批次
+    
+    优化：不再对千万级 tasks 表做 COUNT 子查询，
+    改用 jobs 表已有的 completed/failed 字段推算 pending。
+    """
     cursor = db.cursor()
+    cursor.execute("SELECT * FROM jobs ORDER BY id DESC")
+    jobs = cursor.fetchall()
+
+    # 批量查询每个 job 的已下载总大小（从 export_groups 表，毫秒级）
     cursor.execute(
-        "SELECT j.*, "
-        "(SELECT COUNT(*) FROM tasks t WHERE t.job_id = j.id AND t.status = 'pending') as pending_count, "
-        "(SELECT COUNT(*) FROM tasks t WHERE t.job_id = j.id AND t.status IN ('assigned','downloading','uploading')) as active_count "
-        "FROM jobs j ORDER BY j.id DESC"
+        "SELECT job_id, COALESCE(SUM(total_size), 0) as total_bytes "
+        "FROM export_groups GROUP BY job_id"
     )
-    return cursor.fetchall()
+    size_map = {row["job_id"]: row["total_bytes"] for row in cursor.fetchall()}
+
+    # 批量查询 active 数量（只查非 pending/completed/failed/dead，数量极少）
+    for job in jobs:
+        job["pending_count"] = max(0, (job.get("total_tracks") or 0) - (job.get("completed") or 0) - (job.get("failed") or 0))
+        job["total_bytes"] = size_map.get(job["id"], 0)
+        cursor.execute(
+            "SELECT COUNT(*) as cnt FROM tasks WHERE job_id = %s AND status IN ('assigned','downloading','uploading')",
+            (job["id"],)
+        )
+        job["active_count"] = cursor.fetchone()["cnt"]
+
+    return jobs
 
 
 @router.post("/import")

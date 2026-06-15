@@ -34,6 +34,7 @@ from routers.workers import router as workers_router
 from routers.tasks import router as tasks_router
 from routers.dashboard import router as dashboard_router
 from services.token_manager import router as auth_router
+from routers.exports import router as exports_router
 
 app.include_router(config_router)
 app.include_router(accounts_router)
@@ -42,15 +43,20 @@ app.include_router(workers_router)
 app.include_router(tasks_router)
 app.include_router(dashboard_router)
 app.include_router(auth_router)
+app.include_router(exports_router)
 
 
 @app.on_event("startup")
 def start_background_tasks():
-    """启动后台 Token 自动刷新"""
+    """启动后台任务：Token 自动刷新 + 导出分组构建"""
     import threading
     from services.token_manager import auto_refresh_loop
     t = threading.Thread(target=auto_refresh_loop, daemon=True)
     t.start()
+
+    # 启动导出分组后台构建线程
+    from routers.exports import start_group_builder
+    start_group_builder()
 
 
 @app.get("/api/health")

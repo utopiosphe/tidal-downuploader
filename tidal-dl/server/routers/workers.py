@@ -25,10 +25,19 @@ class WorkerHeartbeat(BaseModel):
 
 @router.get("")
 def list_workers(db=Depends(get_db_dependency)):
-    """获取所有 Worker"""
+    """获取所有 Worker（根据心跳时间动态判断在线状态）"""
     cursor = db.cursor()
     cursor.execute("SELECT * FROM workers ORDER BY last_heartbeat DESC")
-    return cursor.fetchall()
+    from datetime import datetime, timedelta
+    now = datetime.now()
+    workers = cursor.fetchall()
+    for w in workers:
+        hb = w.get("last_heartbeat")
+        if hb and isinstance(hb, datetime) and (now - hb).total_seconds() < 60:
+            w["status"] = "online"
+        else:
+            w["status"] = "offline"
+    return workers
 
 
 class WorkerUpdate(BaseModel):
@@ -151,11 +160,15 @@ def get_worker_config(worker_id: str, db=Depends(get_db_dependency)):
     worker_concurrency = worker.get("max_concurrency")
     effective_concurrency = worker_concurrency or config["download"]["concurrency"]
 
+    # S3: 只下发 enabled 的存储（隐藏 secret_key 以外的敏感信息不需要隐藏，Worker 需要完整配置）
+    s3_list = config.get("s3", [])
+    enabled_s3 = [s for s in s3_list if s.get("enabled", True)]
+
     return {
         "worker_id": worker_id,
         "concurrency": effective_concurrency,
         "quality": config["download"]["quality"],
         "proxy": config["proxy"],
-        "s3": config["s3"],
+        "s3": enabled_s3,
         "download": config["download"],
     }

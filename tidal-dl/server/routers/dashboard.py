@@ -10,32 +10,32 @@ def get_dashboard(db=Depends(get_db_dependency)):
     """总览统计"""
     cursor = db.cursor()
 
-    # 从 jobs 表快速获取总任务数
-    cursor.execute("SELECT COALESCE(SUM(total_tracks), 0) as total FROM jobs")
-    total_tasks = int(cursor.fetchone()["total"])
-
-    # 仅统计非 pending 的状态（因为 pending 数据量极大，会导致千万级全表扫描）
+    # 从 jobs 表一次性获取所有汇总数据（毫秒级，无需扫 tasks 表）
     cursor.execute(
-        "SELECT status, COUNT(*) as count FROM tasks "
-        "WHERE status IN ('completed', 'failed', 'dead', 'assigned', 'downloading', 'uploading') "
-        "GROUP BY status"
+        "SELECT COUNT(*) as job_count, "
+        "COALESCE(SUM(total_tracks), 0) as total, "
+        "COALESCE(SUM(completed), 0) as completed, "
+        "COALESCE(SUM(failed), 0) as failed "
+        "FROM jobs"
     )
-    task_stats = {row["status"]: row["count"] for row in cursor.fetchall()}
+    jobs_summary = cursor.fetchone()
+    total_tasks = int(jobs_summary["total"])
+    completed = int(jobs_summary["completed"])
+    failed = int(jobs_summary["failed"])
+    total_jobs = int(jobs_summary["job_count"])
 
-    completed = task_stats.get("completed", 0)
-    active = task_stats.get("assigned", 0) + task_stats.get("downloading", 0) + task_stats.get("uploading", 0)
-    failed = task_stats.get("failed", 0) + task_stats.get("dead", 0)
-    
-    # 用减法算出 pending 数量，避免扫描千万级数据
+    # 活跃任务数（assigned/downloading/uploading 量很小，走 idx_assigned_worker 索引）
+    cursor.execute(
+        "SELECT COUNT(*) as cnt FROM tasks "
+        "WHERE status IN ('assigned', 'downloading', 'uploading')"
+    )
+    active = cursor.fetchone()["cnt"]
+
     pending = max(0, total_tasks - completed - active - failed)
 
-    # 总下载大小
-    cursor.execute("SELECT COALESCE(SUM(file_size), 0) as total_bytes FROM tasks WHERE status = 'completed'")
+    # 总下载大小（从 export_groups 表汇总，只有几十行，毫秒级）
+    cursor.execute("SELECT COALESCE(SUM(total_size), 0) as total_bytes FROM export_groups")
     total_bytes = cursor.fetchone()["total_bytes"]
-
-    # Job 统计
-    cursor.execute("SELECT COUNT(*) as count FROM jobs")
-    total_jobs = cursor.fetchone()["count"]
 
     # Worker 统计
     cursor.execute(
@@ -51,17 +51,17 @@ def get_dashboard(db=Depends(get_db_dependency)):
     )
     account_stats = {row["status"]: row["count"] for row in cursor.fetchall()}
 
-    # 最近完成的任务
+    # 最近完成的任务（用 id DESC 走主键索引，避免 completed_at filesort）
     cursor.execute(
         "SELECT id, title, artist, album, file_size, actual_quality, completed_at "
-        "FROM tasks WHERE status = 'completed' ORDER BY completed_at DESC LIMIT 10"
+        "FROM tasks WHERE status = 'completed' ORDER BY id DESC LIMIT 10"
     )
     recent_completed = cursor.fetchall()
 
-    # 最近失败的任务
+    # 最近失败的任务（用 id DESC 走主键索引）
     cursor.execute(
         "SELECT id, title, artist, error_code, error_message, updated_at "
-        "FROM tasks WHERE status IN ('failed', 'dead') ORDER BY updated_at DESC LIMIT 10"
+        "FROM tasks WHERE status IN ('failed', 'dead') ORDER BY id DESC LIMIT 10"
     )
     recent_failed = cursor.fetchall()
 
@@ -72,7 +72,7 @@ def get_dashboard(db=Depends(get_db_dependency)):
             "active": active,
             "completed": completed,
             "failed": failed,
-            "by_status": task_stats,
+            "by_status": {"completed": completed, "failed": failed, "active": active, "pending": pending},
         },
         "total_bytes": total_bytes,
         "total_bytes_mb": round(total_bytes / (1024 * 1024), 1) if total_bytes else 0,

@@ -11,14 +11,21 @@ DEFAULT_CONFIG = {
         "password": "0609bdtest",
         "protocol": "socks5"
     },
-    "s3": {
-        "endpoint": "",
-        "access_key": "",
-        "secret_key": "",
-        "bucket": "",
-        "region": "",
-        "prefix": "flac/"
-    },
+    "s3": [
+        {
+            "id": "default",
+            "name": "默认存储",
+            "provider": "aws",
+            "enabled": True,
+            "endpoint": "",
+            "access_key": "",
+            "secret_key": "",
+            "bucket": "",
+            "region": "",
+            "prefix": "flac/",
+            "download_domain": ""
+        }
+    ],
     "download": {
         "quality": "LOSSLESS",
         "concurrency": 10,
@@ -48,6 +55,15 @@ def get_config(db) -> dict:
     for k, v in DEFAULT_CONFIG.items():
         if k not in result:
             result[k] = v
+    # 兼容旧格式：如果 s3 是 dict（单存储），自动包装为 list
+    if isinstance(result.get("s3"), dict):
+        old = result["s3"]
+        old.setdefault("id", "aws-eu")
+        old.setdefault("name", "AWS 存储")
+        old.setdefault("provider", "aws")
+        old.setdefault("enabled", True)
+        old.setdefault("download_domain", "")
+        result["s3"] = [old]
     return result
 
 
