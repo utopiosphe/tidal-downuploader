@@ -258,7 +258,7 @@ def _do_cleanup(group_id: int, job_id: int, group_index: int, s3_list: list):
         )
         db.commit()
 
-        # 构建 storage_id → (client, bucket) 映射
+        # 构建 storage_id → (client, bucket) 映射（跳过已禁用的存储，如已关闭的 GCS）
         clients = {}
         default_sid = None
         for cfg in s3_list:
@@ -266,6 +266,11 @@ def _do_cleanup(group_id: int, job_id: int, group_index: int, s3_list: list):
             if not default_sid:
                 default_sid = sid
             provider = cfg.get("provider", "aws")
+            # 硬编码跳过 GCS：谷歌云已彻底关闭，清理时一律不再尝试删除其对象；
+            # 同时跳过任何被禁用（enabled=False）的存储。GCS 的 key 会在下方 “sid not in clients” 分支被忽略
+            if provider == "gcs" or not cfg.get("enabled", True):
+                logger.info(f"Group {group_id}: 跳过存储 {sid}（provider={provider}, enabled={cfg.get('enabled', True)}）")
+                continue
             boto_kwargs = {"max_pool_connections": 50}
             if provider == "gcs":
                 boto_kwargs["signature_version"] = "s3v4"
@@ -302,34 +307,50 @@ def _do_cleanup(group_id: int, job_id: int, group_index: int, s3_list: list):
                 batches.setdefault(sid, []).append(key)
 
         cleaned = 0
+        had_error = False
         for sid, keys in batches.items():
             if sid not in clients:
-                logger.warning(f"Group {group_id}: 存储 {sid} 未找到配置，跳过 {len(keys)} 个文件")
+                # 存储未配置或已禁用（如已关闭的 GCS），跳过这部分对象，不计入失败
+                logger.info(f"Group {group_id}: 跳过存储 {sid} 的 {len(keys)} 个对象（未启用/未配置）")
                 continue
             client, bucket = clients[sid]
-            # 分批删除（每次最多 1000）
-            for i in range(0, len(keys), 1000):
-                batch = [{"Key": k} for k in keys[i:i+1000]]
-                client.delete_objects(
-                    Bucket=bucket,
-                    Delete={"Objects": batch, "Quiet": True}
-                )
-                cleaned += len(batch)
-                cursor.execute(
-                    "UPDATE export_groups SET s3_cleaned_count = %s WHERE id = %s",
-                    (cleaned, group_id)
-                )
-                db.commit()
-                logger.info(f"Group {group_id}: 已清理 {cleaned} 个文件 (存储: {sid})")
+            try:
+                # 分批删除（每次最多 1000）
+                for i in range(0, len(keys), 1000):
+                    batch = [{"Key": k} for k in keys[i:i+1000]]
+                    client.delete_objects(
+                        Bucket=bucket,
+                        Delete={"Objects": batch, "Quiet": True}
+                    )
+                    cleaned += len(batch)
+                    cursor.execute(
+                        "UPDATE export_groups SET s3_cleaned_count = %s WHERE id = %s",
+                        (cleaned, group_id)
+                    )
+                    db.commit()
+                    logger.info(f"Group {group_id}: 已清理 {cleaned} 个文件 (存储: {sid})")
+            except Exception as e:
+                # 单个存储删除失败不再中断其它存储的清理
+                had_error = True
+                logger.error(f"Group {group_id}: 存储 {sid} 删除失败 - {e}")
 
-        # 完成
-        cursor.execute(
-            "UPDATE export_groups SET s3_cleanup_status = 'completed', "
-            "s3_cleaned_count = %s, s3_cleaned_at = NOW() WHERE id = %s",
-            (cleaned, group_id)
-        )
-        db.commit()
-        logger.info(f"Group {group_id}: S3 清理完成, 共删除 {cleaned} 个文件")
+        # 完成：所有启用的存储都成功才算 completed，否则 failed（已删数量保留）
+        if had_error:
+            cursor.execute(
+                "UPDATE export_groups SET s3_cleanup_status = 'failed', "
+                "s3_cleaned_count = %s WHERE id = %s",
+                (cleaned, group_id)
+            )
+            db.commit()
+            logger.warning(f"Group {group_id}: 部分存储删除失败，已删 {cleaned} 个文件")
+        else:
+            cursor.execute(
+                "UPDATE export_groups SET s3_cleanup_status = 'completed', "
+                "s3_cleaned_count = %s, s3_cleaned_at = NOW() WHERE id = %s",
+                (cleaned, group_id)
+            )
+            db.commit()
+            logger.info(f"Group {group_id}: S3 清理完成, 共删除 {cleaned} 个文件")
 
     except Exception as e:
         logger.error(f"Group {group_id}: S3 清理失败 - {e}")
