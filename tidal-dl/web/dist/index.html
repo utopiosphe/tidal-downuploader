@@ -457,19 +457,25 @@ const Jobs = {
                             <div style="width:70px;text-align:right;color:#4ade80;font-weight:600;font-size:11px">{{ fmtBytes(g.total_size) }}</div>
                             <div style="width:70px;text-align:right;color:#888;font-size:11px">{{ g.task_count.toLocaleString() }}</div>
                             <div style="flex:1;text-align:center">
-                                <span v-if="g.s3_cleanup_status === 'none'" style="font-size:10px;color:#555;background:rgba(255,255,255,0.04);padding:1px 6px;border-radius:3px">未清理</span>
-                                <span v-else-if="g.s3_cleanup_status === 'pending'" style="font-size:10px;color:#eab308;background:rgba(234,179,8,0.1);padding:1px 6px;border-radius:3px">等待中</span>
-                                <span v-else-if="g.s3_cleanup_status === 'running'" style="font-size:10px;color:#60a5fa;background:rgba(96,165,250,0.1);padding:1px 6px;border-radius:3px">🔄 {{ g.s3_cleaned_count }}/{{ g.task_count }}</span>
-                                <span v-else-if="g.s3_cleanup_status === 'completed'" style="font-size:10px;color:#4ade80;background:rgba(74,222,128,0.1);padding:1px 6px;border-radius:3px">✅ 已清理</span>
-                                <span v-else-if="g.s3_cleanup_status === 'failed'" style="font-size:10px;color:#f87171;background:rgba(248,113,113,0.1);padding:1px 6px;border-radius:3px">❌ 失败</span>
+                                <span v-if="g.sealed === false" style="font-size:10px;color:#eab308;background:rgba(234,179,8,0.12);padding:1px 6px;border-radius:3px">🔄 生成中</span>
+                                <template v-else>
+                                    <span v-if="g.s3_cleanup_status === 'none'" style="font-size:10px;color:#555;background:rgba(255,255,255,0.04);padding:1px 6px;border-radius:3px">未清理</span>
+                                    <span v-else-if="g.s3_cleanup_status === 'pending'" style="font-size:10px;color:#eab308;background:rgba(234,179,8,0.1);padding:1px 6px;border-radius:3px">等待中</span>
+                                    <span v-else-if="g.s3_cleanup_status === 'running'" style="font-size:10px;color:#60a5fa;background:rgba(96,165,250,0.1);padding:1px 6px;border-radius:3px">🔄 {{ g.s3_cleaned_count }}/{{ g.task_count }}</span>
+                                    <span v-else-if="g.s3_cleanup_status === 'completed'" style="font-size:10px;color:#4ade80;background:rgba(74,222,128,0.1);padding:1px 6px;border-radius:3px">✅ 已清理</span>
+                                    <span v-else-if="g.s3_cleanup_status === 'failed'" style="font-size:10px;color:#f87171;background:rgba(248,113,113,0.1);padding:1px 6px;border-radius:3px">❌ 失败</span>
+                                </template>
                             </div>
                             <div style="width:130px;display:flex;gap:4px;justify-content:flex-end">
-                                <button class="btn btn-sm btn-primary" @click="downloadGroup(g.group_index)" style="font-size:10px;padding:2px 7px">⬇ CSV</button>
-                                <button class="btn btn-sm" style="background:rgba(248,113,113,0.15);color:#f87171;font-size:10px;padding:2px 7px" 
-                                        @click="confirmCleanup(g)" :disabled="g.s3_cleanup_status === 'running' || g.s3_cleanup_status === 'pending'"
-                                        v-if="g.s3_cleanup_status !== 'completed'">🗑️ 清理</button>
-                                <button class="btn btn-sm" style="background:rgba(248,113,113,0.15);color:#f87171;font-size:10px;padding:2px 7px" 
-                                        @click="confirmCleanup(g)" v-if="g.s3_cleanup_status === 'failed'">🔄</button>
+                                <span v-if="g.sealed === false" style="font-size:10px;color:#666">封存后可操作</span>
+                                <template v-else>
+                                    <button class="btn btn-sm btn-primary" @click="downloadGroup(g.group_index)" style="font-size:10px;padding:2px 7px">⬇ CSV</button>
+                                    <button class="btn btn-sm" style="background:rgba(248,113,113,0.15);color:#f87171;font-size:10px;padding:2px 7px"
+                                            @click="confirmCleanup(g)" :disabled="g.s3_cleanup_status === 'running' || g.s3_cleanup_status === 'pending'"
+                                            v-if="g.s3_cleanup_status !== 'completed'">🗑️ 清理</button>
+                                    <button class="btn btn-sm" style="background:rgba(248,113,113,0.15);color:#f87171;font-size:10px;padding:2px 7px"
+                                            @click="confirmCleanup(g)" v-if="g.s3_cleanup_status === 'failed'">🔄</button>
+                                </template>
                             </div>
                         </div>
                     </div>

@@ -63,7 +63,11 @@ ssh "$REMOTE" 'bash -s' <<'WORKEREOF'
   # 启动新 Worker 集群 (20个)
   cd /opt/tidal-dl/worker
   rm -f /opt/tidal-dl/worker_*.pid /opt/tidal-dl/worker_*.log
-  
+
+  # 临时文件落到 RAID0(/data/clickhouse),避免下载/转码中间文件撑爆根盘 /
+  export TMPDIR=/data/clickhouse/tidal_tmp
+  mkdir -p "$TMPDIR"
+
   for i in {1..20}; do
     nohup /opt/tidal-dl/venv/bin/python -u main.py \
       --server http://127.0.0.1:8000 \
