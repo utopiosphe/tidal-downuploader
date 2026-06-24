@@ -32,11 +32,17 @@ def get_export_groups(job_id: int, db=Depends(get_db_dependency)):
     total = sum(g["task_count"] for g in groups)
     total_size = sum(g["total_size"] for g in groups)
 
-    # 序列化 datetime
+    # 作业是否已完成（完成后末组也算封存）
+    cursor.execute("SELECT status FROM jobs WHERE id = %s", (job_id,))
+    jrow = cursor.fetchone()
+    job_done = bool(jrow) and jrow.get("status") == "completed"
+
+    # 序列化 datetime + 标注封存状态（满 GROUP_SIZE 或作业已完成 = 已封存）
     for g in groups:
         for k in ("time_range_start", "time_range_end", "s3_cleaned_at", "created_at", "updated_at"):
             if g.get(k):
                 g[k] = str(g[k])
+        g["sealed"] = (g["task_count"] >= GROUP_SIZE) or job_done
 
     return {
         "total": total,
@@ -56,58 +62,54 @@ def refresh_export_groups(job_id: int, db=Depends(get_db_dependency)):
 
 
 def _build_groups_for_job(job_id: int, db) -> int:
-    """为指定 job 构建/更新 export_groups（核心逻辑）"""
+    """为指定 job 分配并封存导出分组（成员固化，永不重算）。
+
+    设计要点（计费安全）：
+    - 每个 task 只在【首次】被分配一个永久组号 export_group_idx，之后再也不变；
+    - 仅给"已完成、尚未分组(export_group_idx IS NULL)"的任务按 (completed_at, id)
+      升序 append 到序列末尾，组号 = 序号 // GROUP_SIZE（append-only）；
+    - export_groups 仅作为统计快照，按固化的 export_group_idx 汇总，不再用 offset。
+
+    这样 CSV 下载、清理、统计三者都以同一份固化成员为准，
+    刷新/重试/重下都不会改变已有批次（Excel 不变、计费不变）。
+    """
     cursor = db.cursor()
 
-    # 查询已完成任务总数
+    # 当前已分配任务数 = 新任务追加的起始序号（保证 append-only）
     cursor.execute(
-        "SELECT COUNT(*) as cnt FROM tasks WHERE job_id = %s AND status = 'completed'",
+        "SELECT COUNT(*) AS cnt FROM tasks "
+        "WHERE job_id = %s AND export_group_idx IS NOT NULL",
         (job_id,)
     )
-    completed_count = cursor.fetchone()["cnt"]
-    if completed_count == 0:
-        return 0
+    base = cursor.fetchone()["cnt"]
 
-    # 计算应有的分组数
-    total_groups = (completed_count + GROUP_SIZE - 1) // GROUP_SIZE
-
-    # 查询已有分组
+    # 给"已完成但未分组"的任务追加分配永久组号（已分配的绝不触碰）
     cursor.execute(
-        "SELECT group_index, task_count FROM export_groups WHERE job_id = %s ORDER BY group_index",
-        (job_id,)
+        "UPDATE tasks t "
+        "JOIN ( "
+        "  SELECT id, "
+        "         (%s + ROW_NUMBER() OVER (ORDER BY completed_at ASC, id ASC) - 1) AS seq "
+        "  FROM tasks "
+        "  WHERE job_id = %s AND status = 'completed' AND export_group_idx IS NULL "
+        ") r ON t.id = r.id "
+        "SET t.export_group_idx = FLOOR(r.seq / %s)",
+        (base, job_id, GROUP_SIZE)
     )
-    existing = {row["group_index"]: row["task_count"] for row in cursor.fetchall()}
+    db.commit()
 
-    updated = 0
-    for grp_idx in range(total_groups):
-        offset = grp_idx * GROUP_SIZE
-        is_last = (grp_idx == total_groups - 1)
-        expected_count = completed_count - offset if is_last else GROUP_SIZE
-
-        # 如果已存在且是满组，跳过（不需要更新）
-        if grp_idx in existing and existing[grp_idx] == GROUP_SIZE:
-            continue
-
-        # 查询该分组的统计信息
-        cursor.execute(
-            "SELECT COUNT(*) as cnt, COALESCE(SUM(file_size), 0) as total_size, "
-            "MIN(completed_at) as time_start, MAX(completed_at) as time_end "
-            "FROM tasks WHERE job_id = %s AND status = 'completed' "
-            "ORDER BY completed_at ASC LIMIT %s OFFSET %s",
-            (job_id, GROUP_SIZE, offset)
-        )
-        # 上面的 SQL 有 GROUP BY 问题，改用子查询
-        cursor.execute(
-            "SELECT COUNT(*) as cnt, COALESCE(SUM(file_size), 0) as total_size, "
-            "MIN(completed_at) as time_start, MAX(completed_at) as time_end "
-            "FROM (SELECT file_size, completed_at FROM tasks "
-            "WHERE job_id = %s AND status = 'completed' "
-            "ORDER BY completed_at ASC LIMIT %s OFFSET %s) sub",
-            (job_id, GROUP_SIZE, offset)
-        )
-        stats = cursor.fetchone()
-
-        # UPSERT
+    # 仅重算受本次分配影响的组（>= 起始组），已封存的老组统计不变、不重扫
+    start_group = base // GROUP_SIZE
+    cursor.execute(
+        "SELECT export_group_idx AS gidx, COUNT(*) AS cnt, "
+        "COALESCE(SUM(file_size), 0) AS total_size, "
+        "MIN(completed_at) AS t_start, MAX(completed_at) AS t_end "
+        "FROM tasks "
+        "WHERE job_id = %s AND export_group_idx IS NOT NULL AND export_group_idx >= %s "
+        "GROUP BY export_group_idx",
+        (job_id, start_group)
+    )
+    rows = cursor.fetchall()
+    for r in rows:
         cursor.execute(
             "INSERT INTO export_groups (job_id, group_index, task_count, total_size, "
             "time_range_start, time_range_end) "
@@ -116,13 +118,18 @@ def _build_groups_for_job(job_id: int, db) -> int:
             "total_size = VALUES(total_size), "
             "time_range_start = VALUES(time_range_start), "
             "time_range_end = VALUES(time_range_end)",
-            (job_id, grp_idx, stats["cnt"], stats["total_size"],
-             stats["time_start"], stats["time_end"])
+            (job_id, r["gidx"], r["cnt"], r["total_size"], r["t_start"], r["t_end"])
         )
-        updated += 1
-
     db.commit()
-    logger.info(f"Job {job_id}: 分组刷新完成, 共 {total_groups} 组, 更新 {updated} 组")
+
+    # 返回当前总组数
+    cursor.execute(
+        "SELECT COUNT(DISTINCT export_group_idx) AS n FROM tasks "
+        "WHERE job_id = %s AND export_group_idx IS NOT NULL",
+        (job_id,)
+    )
+    total_groups = cursor.fetchone()["n"]
+    logger.info(f"Job {job_id}: 分组封存完成, 共 {total_groups} 组 (本次新分配起始组 {start_group})")
     return total_groups
 
 
@@ -130,17 +137,28 @@ def _build_groups_for_job(job_id: int, db) -> int:
 
 @router.get("/groups/download")
 def download_group_csv(job_id: int, group: int = 0, db=Depends(get_db_dependency)):
-    """导出指定分组的已完成任务为 CSV"""
+    """导出指定分组的已完成任务为 CSV（按固化组号，内容永久可复现）"""
     cursor = db.cursor()
-    offset = group * GROUP_SIZE
 
+    # 封存校验：未满 GROUP_SIZE 的末组在作业完成前不可下载（仍在生成中）
+    cursor.execute(
+        "SELECT task_count FROM export_groups WHERE job_id = %s AND group_index = %s",
+        (job_id, group)
+    )
+    grow = cursor.fetchone()
+    cursor.execute("SELECT status FROM jobs WHERE id = %s", (job_id,))
+    jrow = cursor.fetchone()
+    job_done = bool(jrow) and jrow.get("status") == "completed"
+    if grow and grow["task_count"] < GROUP_SIZE and not job_done:
+        raise HTTPException(status_code=400, detail="该分组尚未封存(生成中)，暂不可下载")
+
+    # 按【固化】的 export_group_idx 取成员，顺序固定为 (completed_at, id)
     cursor.execute(
         "SELECT id, track_id, title, artist, album, isrc, actual_quality, codec, "
         "file_size, s3_key, storage_id, completed_at "
-        "FROM tasks WHERE status='completed' AND job_id = %s "
-        "ORDER BY completed_at ASC "
-        "LIMIT %s OFFSET %s",
-        (job_id, GROUP_SIZE, offset)
+        "FROM tasks WHERE job_id = %s AND export_group_idx = %s "
+        "ORDER BY completed_at ASC, id ASC",
+        (job_id, group)
     )
     rows = cursor.fetchall()
 
@@ -215,6 +233,17 @@ def cleanup_group_s3(group_id: int, db=Depends(get_db_dependency)):
     if group["s3_cleanup_status"] == "running":
         raise HTTPException(status_code=400, detail="该分组正在清理中")
 
+    # 安全闸：未封存(未满 GROUP_SIZE)的末组，在作业完成前不可清理，
+    # 避免删到正在下载/上传中的数据。
+    cursor.execute("SELECT status FROM jobs WHERE id = %s", (group["job_id"],))
+    jrow = cursor.fetchone()
+    job_done = bool(jrow) and jrow.get("status") == "completed"
+    if group["task_count"] < GROUP_SIZE and not job_done:
+        raise HTTPException(
+            status_code=400,
+            detail="该分组尚未封存(未满 5 万)，作业完成前不可清理"
+        )
+
     # 标记为 pending
     cursor.execute(
         "UPDATE export_groups SET s3_cleanup_status = 'pending', s3_cleaned_count = 0 WHERE id = %s",
@@ -287,15 +316,13 @@ def _do_cleanup(group_id: int, job_id: int, group_index: int, s3_list: list):
             )
             clients[sid] = (client, cfg["bucket"])
 
-        offset = group_index * GROUP_SIZE
-
-        # 查询该组所有 s3_key + storage_id
+        # 查询该组所有 s3_key + storage_id —— 按【固化】的 export_group_idx 精确取，
+        # 不再用 offset，彻底杜绝"删错组/删到更新批次"。
         cursor.execute(
             "SELECT s3_key, storage_id FROM tasks "
-            "WHERE job_id = %s AND status = 'completed' AND s3_key IS NOT NULL AND s3_key != '' "
-            "ORDER BY completed_at ASC "
-            "LIMIT %s OFFSET %s",
-            (job_id, GROUP_SIZE, offset)
+            "WHERE job_id = %s AND export_group_idx = %s "
+            "AND s3_key IS NOT NULL AND s3_key != ''",
+            (job_id, group_index)
         )
 
         # 按 storage_id 分组
