@@ -16,14 +16,14 @@ DB_CONFIG = {
 # 初始化连接池
 POOL = PooledDB(
     creator=pymysql,
-    maxconnections=100,  # 最大连接数
+    maxconnections=200,  # 最大连接数(需 <= MySQL max_connections，见部署时调整)
     mincached=10,        # 初始空闲连接数
     maxcached=50,        # 最大空闲连接数
     maxshared=0,         # 共享连接数
     blocking=True,       # 超过最大连接数时阻塞等待
     maxusage=None,       # 单个连接最大复用次数
     setsession=[],       # 开始会话前执行的命令列表
-    ping=1,              # ping MySQL 服务器的频率 (1=每次获取前)
+    ping=4,              # 仅在事务开始时 ping(1=每次获取前，高并发下开销大)
     **DB_CONFIG
 )
 

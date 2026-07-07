@@ -71,10 +71,30 @@ if os.path.exists(web_dist):
 
 
 if __name__ == "__main__":
+    # 加大同步路由线程池：默认 anyio 线程池仅 40，低于 DB 连接池(100)，
+    # 高并发下线程被阻塞占满会导致新请求排不进队、整个 server 假死。
+    # 单进程运行（workers=1），保住 pending_auths / 后台线程等进程内共享状态。
+    import anyio
+    from anyio import to_thread
+
+    async def _raise_thread_limit():
+        # 将同步线程池上限提到 100，匹配 DB 连接池 maxconnections
+        limiter = to_thread.current_default_thread_limiter()
+        limiter.total_tokens = 100
+
+    # FastAPI 启动时抬高线程池上限
+    @app.on_event("startup")
+    async def _tune_threadpool():
+        await _raise_thread_limit()
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
         port=8000,
-        reload=True,
+        workers=1,              # 单进程：保护进程内共享状态
         log_level="info",
+        timeout_keep_alive=30,   # 空闲 keep-alive 连接 30s 回收，避免连接堆积
+        limit_concurrency=1000,  # 并发上限保护(远高于常态)：极端时拒绝而非拖垮进程；
+                                 # 真正的背压来自线程池(100)+DB连接池(100)，会自然排队
+        backlog=2048,
     )
