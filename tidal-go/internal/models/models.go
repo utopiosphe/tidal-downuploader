@@ -31,6 +31,7 @@ type Task struct {
 	CreatedAt         time.Time  `db:"created_at" json:"created_at"`
 	UpdatedAt         time.Time  `db:"updated_at" json:"updated_at"`
 	CompletedAt       *time.Time `db:"completed_at" json:"completed_at"`
+	ExportGroupIdx    *int       `db:"export_group_idx" json:"export_group_idx"`
 }
 
 // Job 对应 jobs 表(下载批次)。

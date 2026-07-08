@@ -31,6 +31,9 @@ func main() {
 	// 后台:token 刷新(独立 goroutine,与请求处理隔离)
 	go server.RunTokenRefresher(ctx, database)
 
+	// 后台:导出分组构建(每 5 分钟,对 running jobs 追加固化组号)
+	go h.RunGroupBuilder(ctx)
+
 	// 后台:job 计数攒批 flush + 配置热更新
 	go func() {
 		flushTicker := time.NewTicker(2 * time.Second)

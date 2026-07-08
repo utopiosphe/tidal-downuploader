@@ -25,9 +25,11 @@ CREATE TABLE IF NOT EXISTS tasks_archive (
   s3_key            varchar(1000) DEFAULT NULL,
   storage_id        varchar(50) DEFAULT NULL,
   completed_at      datetime DEFAULT NULL,
+  export_group_idx  int(11) DEFAULT NULL,            -- 固化导出组号(append-only,永不变)
   PRIMARY KEY (id),
   KEY idx_job_completed (job_id, completed_at),      -- 导出/趋势:按 job + 时间
-  KEY idx_job_status (job_id, status)
+  KEY idx_job_status (job_id, status),
+  KEY idx_job_groupidx (job_id, export_group_idx)    -- 导出分组/清理按固化组号取
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- 2. 把现有 completed/dead 数据搬到归档表(分批,避免大事务;按 id 区间循环执行)。
