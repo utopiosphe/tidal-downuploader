@@ -65,6 +65,13 @@ type Account struct {
 	TotalDownloads int        `db:"total_downloads" json:"total_downloads"`
 	CooldownUntil  *time.Time `db:"cooldown_until" json:"cooldown_until"`
 	RateLimitCount int        `db:"rate_limit_count" json:"rate_limit_count"`
+	// 下面5列此前缺失,导致 SELECT * 的 sqlx 扫描报 missing destination name,
+	// ListAccounts/GetAccount/手动刷新token 全部静默失败
+	SubscriptionType    *string    `db:"subscription_type" json:"subscription_type"`
+	SubscriptionExpires *time.Time `db:"subscription_expires" json:"subscription_expires"`
+	HighestQuality      *string    `db:"highest_quality" json:"highest_quality"`
+	CreatedAt           *time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt           *time.Time `db:"updated_at" json:"updated_at"`
 }
 
 // Worker 对应 workers 表。

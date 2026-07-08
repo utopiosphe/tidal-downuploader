@@ -15,8 +15,11 @@ import (
 
 // ListAccounts 账号列表(管理端)。
 func (h *Handler) ListAccounts(c *gin.Context) {
-	var accts []models.Account
-	_ = h.DB.Select(&accts, "SELECT * FROM tidal_accounts ORDER BY id")
+	accts := []models.Account{}
+	if err := h.DB.Select(&accts, "SELECT * FROM tidal_accounts ORDER BY id"); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, accts)
 }
 
