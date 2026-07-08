@@ -2,17 +2,27 @@ package worker
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"golang.org/x/net/proxy"
 
 	"tidal-go/internal/config"
 )
+
+// randSessionID 生成随机代理 session 子域(8 字符 hex)。
+func randSessionID() string {
+	b := make([]byte, 4)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 // buildTransport 根据代理配置构建 http.RoundTripper。
 // SOCKS5 用 golang.org/x/net/proxy;HTTP 代理用标准 Transport.Proxy。
@@ -44,6 +54,23 @@ func buildTransport(p config.ProxyConfig) (http.RoundTripper, error) {
 		if p.Username != "" {
 			auth = &proxy.Auth{User: p.Username, Password: p.Password}
 		}
+
+		// host 含 {SessionID} 占位符时,每次拨号随机生成 session,
+		// 让连接均匀分散到代理的不同 POP 出口(代理方推荐用法;
+		// 实测 session 非严格 sticky,随机每连接 = 最大分散 + 坏出口自愈)。
+		if strings.Contains(p.Host, "{SessionID}") {
+			hostTpl := p.Host
+			tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				proxyAddr := fmt.Sprintf("%s:%d", strings.Replace(hostTpl, "{SessionID}", randSessionID(), 1), port)
+				d, err := proxy.SOCKS5("tcp", proxyAddr, auth, proxy.Direct)
+				if err != nil {
+					return nil, err
+				}
+				return d.Dial(network, addr)
+			}
+			return tr, nil
+		}
+
 		dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("%s:%d", p.Host, port), auth, proxy.Direct)
 		if err != nil {
 			return nil, err
