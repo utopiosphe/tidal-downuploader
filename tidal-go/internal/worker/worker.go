@@ -193,11 +193,22 @@ func (w *Worker) reporterLoop(ctx context.Context) {
 	}
 }
 
-// mainLoop 拉任务 + 分发给 goroutine 池。用 semaphore 控制并发。
+// mainLoop 拉任务 + 分发给 goroutine 池。用 semaphore 严格控制并发下载数。
 func (w *Worker) mainLoop(ctx context.Context) error {
-	log.Printf("🚀 开始工作循环 (并发: %d)", w.concurrency)
-	sem := make(chan struct{}, 2048) // 上限保护
+	w.mu.RLock()
+	conc := w.concurrency
+	w.mu.RUnlock()
+	if conc < 1 {
+		conc = 10
+	}
+	log.Printf("🚀 开始工作循环 (并发: %d)", conc)
+
+	// sem 容量 = 并发数:满 conc 个在下载时,主循环阻塞在 sem<-,不再狂拉任务。
+	// 这是背压的关键(修复内存爆炸:之前固定2048导致无限堆积)。
+	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
+	// 拉取批次不超过并发余量,避免抢占过多任务占着
+	fetchN := conc
 
 	for {
 		select {
@@ -207,15 +218,7 @@ func (w *Worker) mainLoop(ctx context.Context) error {
 		default:
 		}
 
-		w.mu.RLock()
-		conc := w.concurrency
-		w.mu.RUnlock()
-
-		batchSize := conc
-		if batchSize < 10 {
-			batchSize = 10
-		}
-		resp, err := w.server.FetchTasks(w.workerID, batchSize)
+		resp, err := w.server.FetchTasks(w.workerID, fetchN)
 		if err != nil {
 			log.Printf("拉取任务失败: %v", err)
 			time.Sleep(3 * time.Second)
@@ -273,6 +276,15 @@ func (w *Worker) processTask(ctx context.Context, task models.Task, acct models.
 	if country == "" {
 		country = "NG"
 	}
+
+	title, artist := "?", "?"
+	if task.Title != nil {
+		title = *task.Title
+	}
+	if task.Artist != nil {
+		artist = *task.Artist
+	}
+	log.Printf("🎵 [%d] %s - %s (track=%d, acc=%d)", task.ID, artist, title, task.TrackID, accID)
 
 	// 上报开始下载
 	w.statusCh <- StatusUpdate{TaskID: task.ID, Status: "downloading", AccountID: &accID}
