@@ -18,12 +18,17 @@ import (
 // SOCKS5 用 golang.org/x/net/proxy;HTTP 代理用标准 Transport.Proxy。
 // 连接池参数针对高并发下载调大;跳过 TLS 校验(与 Python verify=False 一致)。
 func buildTransport(p config.ProxyConfig) (http.RoundTripper, error) {
+	// 必须走 HTTP/1.1:代理按单条 TCP 连接限速(~0.5-2.6MB/s),
+	// HTTP/2 会把所有请求多路复用进极少数连接,总带宽被掐死
+	// (实测 200 并发只建了 40 条连接,18MB/s;Python 版 500 连接池能跑 270MB/s)。
+	// TLSNextProto 置空 map 彻底禁用 h2,一个 in-flight 请求一条连接,靠连接数堆总带宽。
 	tr := &http.Transport{
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
-		MaxIdleConns:        500,
-		MaxIdleConnsPerHost: 100,
+		MaxIdleConns:        0, // 不限总空闲连接
+		MaxIdleConnsPerHost: 2000,
 		IdleConnTimeout:     90 * time.Second,
-		ForceAttemptHTTP2:   true,
+		ForceAttemptHTTP2:   false,
+		TLSNextProto:        make(map[string]func(string, *tls.Conn) http.RoundTripper),
 	}
 
 	if p.Host == "" {
