@@ -33,6 +33,7 @@ func NewRouter(db *sqlx.DB) (*gin.Engine, *handlers.Handler) {
 		api.POST("/workers/:id/heartbeat", h.Heartbeat)
 		api.GET("/workers/:id/config", h.WorkerConfig)
 		api.GET("/workers", h.ListWorkers)
+		api.PUT("/workers/:id", h.UpdateWorker)
 		api.DELETE("/workers/:id", h.DeleteWorker)
 
 		// 任务热路径

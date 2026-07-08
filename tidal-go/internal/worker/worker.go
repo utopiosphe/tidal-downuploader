@@ -193,22 +193,25 @@ func (w *Worker) reporterLoop(ctx context.Context) {
 	}
 }
 
-// mainLoop 拉任务 + 分发给 goroutine 池。用 semaphore 严格控制并发下载数。
-func (w *Worker) mainLoop(ctx context.Context) error {
+// currentConc 读取当前并发配置(心跳每 30s 同步,热生效)。
+func (w *Worker) currentConc() int {
 	w.mu.RLock()
 	conc := w.concurrency
 	w.mu.RUnlock()
 	if conc < 1 {
 		conc = 10
 	}
-	log.Printf("🚀 开始工作循环 (并发: %d)", conc)
+	return conc
+}
 
-	// sem 容量 = 并发数:满 conc 个在下载时,主循环阻塞在 sem<-,不再狂拉任务。
-	// 这是背压的关键(修复内存爆炸:之前固定2048导致无限堆积)。
-	sem := make(chan struct{}, conc)
+// mainLoop 拉任务 + 分发给 goroutine 池。
+// 并发闸门 = activeTasks 原子计数对比 currentConc():
+// 每轮只拉「并发余量」个任务,余量为 0 就等——保持背压(内存有界),
+// 且并发数可由 server 热更新(无需重启,30s 内生效)。
+func (w *Worker) mainLoop(ctx context.Context) error {
+	log.Printf("🚀 开始工作循环 (并发: %d)", w.currentConc())
 	var wg sync.WaitGroup
-	// 拉取批次不超过并发余量,避免抢占过多任务占着
-	fetchN := conc
+	lastConc := w.currentConc()
 
 	for {
 		select {
@@ -218,7 +221,18 @@ func (w *Worker) mainLoop(ctx context.Context) error {
 		default:
 		}
 
-		resp, err := w.server.FetchTasks(w.workerID, fetchN)
+		conc := w.currentConc()
+		if conc != lastConc {
+			log.Printf("🔧 并发热更新: %d → %d", lastConc, conc)
+			lastConc = conc
+		}
+		avail := conc - int(atomic.LoadInt64(&w.activeTasks))
+		if avail <= 0 {
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+
+		resp, err := w.server.FetchTasks(w.workerID, avail)
 		if err != nil {
 			log.Printf("拉取任务失败: %v", err)
 			time.Sleep(3 * time.Second)
@@ -240,12 +254,12 @@ func (w *Worker) mainLoop(ctx context.Context) error {
 				// 账号不可用时,任务未被处理,下轮 fetch 超时回收会重新分配
 				break
 			}
-			// 并发闸门(限制同时下载数 = conc)
-			sem <- struct{}{}
+			// 在派发点计数,保证下一轮 avail 计算准确(不等 goroutine 启动)
+			atomic.AddInt64(&w.activeTasks, 1)
 			wg.Add(1)
 			go func(task models.Task, account models.Account) {
 				defer wg.Done()
-				defer func() { <-sem }()
+				defer atomic.AddInt64(&w.activeTasks, -1)
 				w.processTask(ctx, task, account)
 			}(t, acct)
 		}
@@ -254,8 +268,7 @@ func (w *Worker) mainLoop(ctx context.Context) error {
 
 // processTask 处理单个任务:下载→上传→上报。
 func (w *Worker) processTask(ctx context.Context, task models.Task, acct models.Account) {
-	atomic.AddInt64(&w.activeTasks, 1)
-	defer atomic.AddInt64(&w.activeTasks, -1)
+	// activeTasks 计数已在 mainLoop 派发点维护
 	defer w.pool.Release(acct.ID)
 
 	accID := acct.ID
@@ -368,6 +381,7 @@ func (w *Worker) handleDownloadError(task models.Task, accID int64, err error) {
 }
 
 func (w *Worker) failTask(taskID, accID int64, code, msg string) {
+	log.Printf("❌ [%d] %s: %s (acc=%d)", taskID, code, msg, accID)
 	w.statusCh <- StatusUpdate{
 		TaskID: taskID, Status: "failed", AccountID: &accID,
 		ErrorCode: code, ErrorMessage: msg,

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -96,10 +97,47 @@ func (h *Handler) WorkerConfig(c *gin.Context) {
 	})
 }
 
-// ListWorkers 管理端列表。
+type updateWorkerReq struct {
+	Name           *string `json:"name"`
+	MaxConcurrency *int    `json:"max_concurrency"`
+}
+
+// UpdateWorker 管理端更新 worker(并发数等)。worker 每 30s 同步一次配置,热生效无需重启。
+func (h *Handler) UpdateWorker(c *gin.Context) {
+	workerID := c.Param("id")
+	var req updateWorkerReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.MaxConcurrency != nil {
+		if *req.MaxConcurrency < 1 || *req.MaxConcurrency > 10000 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "max_concurrency 必须在 1-10000 之间"})
+			return
+		}
+		if _, err := h.DB.Exec("UPDATE workers SET max_concurrency=? WHERE id=?", *req.MaxConcurrency, workerID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if req.Name != nil && *req.Name != "" {
+		if _, err := h.DB.Exec("UPDATE workers SET name=? WHERE id=?", *req.Name, workerID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "ok"})
+}
+
+// ListWorkers 管理端列表。心跳超过 90s 视为 offline(status 字段是心跳时写入的,进程死掉不会自己更新)。
 func (h *Handler) ListWorkers(c *gin.Context) {
 	var workers []models.Worker
 	_ = h.DB.Select(&workers, "SELECT * FROM workers ORDER BY last_heartbeat DESC")
+	for i := range workers {
+		if workers[i].LastHeartbeat == nil || time.Since(*workers[i].LastHeartbeat) > 90*time.Second {
+			workers[i].Status = "offline"
+		}
+	}
 	c.JSON(http.StatusOK, workers)
 }
 
