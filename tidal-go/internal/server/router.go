@@ -33,10 +33,12 @@ func NewRouter(db *sqlx.DB) (*gin.Engine, *handlers.Handler) {
 		api.POST("/workers/:id/heartbeat", h.Heartbeat)
 		api.GET("/workers/:id/config", h.WorkerConfig)
 		api.GET("/workers", h.ListWorkers)
+		api.DELETE("/workers/:id", h.DeleteWorker)
 
 		// 任务热路径
 		api.POST("/tasks/fetch", h.Fetch)
 		api.POST("/tasks/report", h.Report)
+		api.GET("/tasks/trend", h.GetTrend)
 
 		// jobs
 		api.GET("/jobs", h.ListJobs)
@@ -58,9 +60,10 @@ func NewRouter(db *sqlx.DB) (*gin.Engine, *handlers.Handler) {
 		api.POST("/accounts/:id/report", h.ReportAccount)
 		api.POST("/accounts/:id/refresh", h.RefreshAccountToken)
 
-		// auth(设备码授权)
+		// auth(设备码授权 + token 刷新)
 		api.POST("/auth/device-code", h.StartDeviceAuth)
 		api.GET("/auth/device-code/:session_id", h.CheckDeviceAuth)
+		api.POST("/auth/refresh/:id", h.RefreshAccountToken) // 前端账号页"刷新token"用此路径
 
 		// exports
 		api.GET("/exports/groups", h.GetExportGroups)

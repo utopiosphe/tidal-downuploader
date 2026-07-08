@@ -103,6 +103,12 @@ func (h *Handler) ListWorkers(c *gin.Context) {
 	c.JSON(http.StatusOK, workers)
 }
 
+// DeleteWorker 删除 worker 记录(管理端)。
+func (h *Handler) DeleteWorker(c *gin.Context) {
+	_, _ = h.DB.Exec("DELETE FROM workers WHERE id=?", c.Param("id"))
+	c.JSON(http.StatusOK, gin.H{"message": "Worker 已删除"})
+}
+
 func randHex(n int) string {
 	b := make([]byte, n/2)
 	_, _ = rand.Read(b)
