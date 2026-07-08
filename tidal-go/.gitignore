@@ -1,0 +1,4 @@
+/bin/
+*.exe
+tidal-server
+tidal-worker
